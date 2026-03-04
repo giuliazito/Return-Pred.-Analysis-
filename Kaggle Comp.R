@@ -346,7 +346,7 @@ auc_lr_full <- auc(roc_lr_full) # 0.713
 
 pros_lr_full_test <- predict(m1_lr_full, newdata = datTest, type = "response")
 roc_lr_full_test <- roc(datTest$returned, pros_lr_full_test, plot = TRUE, grid = TRUE, col = "red", main = "ROC Curve for Logistic Regression Full Model")
-auc_lr_full_test <- auc(roc_lr_full_test) # 0.703. Not bad, not overfitting.
+auc_lr_full_test <- auc(roc_lr_full_test) # 0.7144.
 
 lr_full_auc <- c(Train = 0.713, Test = 0.7144)
 
@@ -362,5 +362,96 @@ results
 #==========================
 # Lasso variable Selection 
 #==========================
+
+# Prepare data - glmnet requires matrix format for predictors 
+datTrain['y'] <- datTrain$returned
+sum(datTrain['y'] != datTrain["returned"]) 
+datTrain$returned <- NULL
+
+datTest['y'] <- datTest$returned
+sum(datTest['y'] != datTest["returned"])
+datTest$returned <- NULL
+
+names(datTrain == "returned")
+names(datTest == "returned")
+
+x_matrix <- as.matrix(datTrain[, 1:(ncol(datTrain)-1)])
+y_target <- datTrain$y
+
+# fit model with lasso penalty alpha = 1
+install.packages("glmnet")
+library(glmnet)
+
+fitLasso <- glmnet(x = x_matrix, 
+                   y = y_target,
+                   family = "binomial", 
+                   alpha = 1, 
+                   standardize = TRUE)
+
+par(mfrow = c(1, 2))
+plot(fitLasso, xvar = "lambda", label = TRUE) # smaller the -log(lambda), the larger the lamba and greater penalty --> coefficients go to 0 
+plot(fitLasso, xvar = "norm", label = TRUE) # sum of coefficients. The smaller the norm, the greater the penalty and more coefficients go to 0.
+
+length(fitLasso$lambda)
+betaHat <- fitLasso$beta # rows are the variables parameters , columns are the different lambda values. The values are the coefficients for each variable at each lambda value.
+dim(betaHat) # left columns are bigger lamba (high penalty), gets smaller as it goes to the right. 
+# FREESHIP stays is chosen even with high penalty, so it is likely an important variable.
+apply(betaHat, 2, function(x) sum(x != 0)) # Shows how many variables are included in the model at each lambda value. The smaller the lambda, the more variables are included. )
+beta_last <- betaHat[, ncol(betaHat)]
+names(beta_last[beta_last == 0])
+sum(beta_last == 0) # 48 variables have coefficients of 0 at the last lambda value, which is the smallest lambda value and therefore the least penalty.
+
+#=====================
+# CV Lasso 
+#=====================
+
+set.seed(42) 
+fid <- sample(1:10, size = nrow(datTrain), replace = TRUE) # Create 10 folds for cross validation. Each row is randomly assigned a number from 1 to 10.))
+install.packages("doParallel")
+library(doParallel)
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoParallel(cl)
+
+cvlasso <- cv.glmnet(x = x_matrix, 
+                     y = y_target,
+                     family = "binomial",
+                     alpha = 1, 
+                     type.measure = "auc",
+                     paralle = TRUE, 
+                     nfolds = 10, foldid = fid)
+stopCluster(cl) 
+par(mfrow = c(1,1))
+plot(cvlasso)
+# smallest lambda value 
+cvlasso$lambda.min
+log(cvlasso$lambda.min) # corresponds to the most right vertical line 
+
+# Lambda selected by one standard deviation rule
+cvlasso$lambda.1se
+log(cvlasso$lambda.1se) # corresponds to the middle vertical line
+coef(cvlasso, s = "lambda.min") # Shows the coefficients for each variable at the lambda value that minimizes the mean cross-validated error. 17 variables have non-zero coefficients at this lambda value.sso)
+coef(cvlasso, s = "lambda.1se") # Shows the coefficients for each variable at the lambda value that is one standard error above the minimum. 10 variables have non-zero coefficients at this lambda value.
+
+# Predicting using the cvlasso
+levels(as.factor(datTest$y))
+ncol(datTest[, -ncol(datTest)]) # testdata with only the predictors  
+x_test <- as.matrix(datTest[, -ncol(datTest)])
+probs_cvlasso_min <- predict(cvlasso, newx = x_test, s = "lambda.min", type = "response")
+probs_cvlasso_1se <- predict(cvlasso, newx = x_test, s = "lambda.1se", type = "response")
+
+roc_cvlasso_min <- roc(datTest$y, as.vector(probs_cvlasso_min), plot = TRUE, grid = TRUE, col = "green", main = "ROC Curve for CV Lasso Model")
+auc(roc_cvlasso_min) # 0.7138
+roc_cvlasso_1se <- roc(datTest$y, as.vector(probs_cvlasso_1se), plot = TRUE, grid = TRUE, col = "orange", main = "ROC Curve for CV Lasso Model")
+auc(roc_cvlasso_1se) #0.7079
+
+results <- data.frame(
+  Models = c('Baseline Logistic Regression', 'CV Lasso (lambda.min)', 'CV Lasso (lambda.1se)'),
+  Train_AUC = c(0.713, NA, NA),
+  Test_AUC = c(0.7144, 0.7138, 0.7079)
+)
+results
+
+
+# Decision Trees Analysis -------------------------------------------------
 
 
