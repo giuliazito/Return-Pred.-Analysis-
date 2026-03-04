@@ -346,7 +346,7 @@ auc_lr_full <- auc(roc_lr_full) # 0.713
 
 pros_lr_full_test <- predict(m1_lr_full, newdata = datTest, type = "response")
 roc_lr_full_test <- roc(datTest$returned, pros_lr_full_test, plot = TRUE, grid = TRUE, col = "red", main = "ROC Curve for Logistic Regression Full Model")
-auc_lr_full_test <- auc(roc_lr_full_test) # 0.703. Not bad, not overfitting.
+auc_lr_full_test <- auc(roc_lr_full_test) # 0.7144.
 
 lr_full_auc <- c(Train = 0.713, Test = 0.7144)
 
@@ -362,5 +362,11 @@ results
 #==========================
 # Lasso variable Selection 
 #==========================
+
+# Prepare data - glmnet requires matrix format for predictors 
+x_matrix <- as.matrix(datTrain[, 1:(ncol(datTrain)-1)])
+y_target <- datTrain$returned
+
+# fit model with lasso penalty alpha = 1
 
 
