@@ -1,11 +1,6 @@
-install.packages("plotrix")
-install.packages("fastDummies")
-install.packages("corrplot")
-install.packages("pROC")
-install.packages("glmnet")
-install.packages("doParallel")
-install.packages("rpart")
-install.packages("smotefamily")
+
+# Libraries ---------------------------------------------------------------
+
 library(tidyverse)
 library(fastDummies)
 library(plotrix)
@@ -16,48 +11,54 @@ library(doParallel)
 library(rpart)
 library(randomForest)
 library(smotefamily)
+library(xgboost)
 
-# Loading data and checking out structure ---------------------------------
+
+# Load Data ---------------------------------------------------------------
+
 dat <- read.csv("returns_train.csv", stringsAsFactors = TRUE)
 # Checking out the structure of the data 
 dim(dat)
 str(dat) # Returned = 1, kept = 0 
 
-# Checking out the levels in a few variables 
-levels(dat$applied_promo_codes)
-levels(dat$loyalty_tier)
-levels(dat$payment_method)
-
-
-# Checking Missing values -------------------------------------------------
+# EDA -------------------------------------------------
 
 #Checking how many NAs we have. # NAs in account_age_days are for those people who have checked out as GUESTS 
 colSums(is.na(dat)) 
 # Customer age and account_age_days have NAs. The numbers are the same for both variables (10491)
 
 # Checking if the NA's of account_age_days match the NA's of customer_age. If so, it's because they are checking out as GUESTS and that info is not available.  
-dat[is.na(dat$account_age_days), "customer_age"] # All NAs in account_age_days are for customers with NA in customer_age. This makes sense because they are guests and we don't have their information.
+dat[is.na(dat$account_age_days), "customer_age"] # All NAs in account_age_days are for customers with NA in customer_age. 
 #We keep this NAs as they are because they are informative. 
 #Missing at Random = the missingness is explained by other variables. 
       #in this case customer_age is missing because account_days_age is missing 
       #and checking out as guests does not allow for this info to be included 
-# After the data is split, dummy variable can be created to say that if NA in account_age_days, then guest is 1. 
-   # Turns out there is a variable for this already - guest_checkout. 
 
 
-# Visualizing class balance -----------------------------------------------
-
+# Visualizing class balance of the outcome variable 
 barplot(table(dat$return), main = "Balance of the outcome variable", xlab = "Return", ylab = "Frequency")
-
 # Checking the percentage of returns in the data 
 sum(dat$return == 1) / nrow(dat) # 15 percent of the orders were returned (=1). Moderate degree of imbalance 
+prop.table(table(dat$return)) # Gives me table with % of 0 and 1 
+# Because there is moderate imbalance in the dataset, we can do undersampling or oversampling (SMOTE) to balance the classes 
 
-# Because there is moderate imbalance in the dataset, we can do undersampling or oversampling
-# Understampling is remove random samples from the majority class 
-# Oversampling creates additional copies of the minority class 
-       #SMOTE (Synthetic Minority Over-sampling Technique) is a popular oversampling technique that creates synthetic samples of the minority class.
-#First split the data, create dummy variables and then do SMOTE on training data only. Not really super necessary since our split seems to be okay. Optional
+# Checking for correlated variables
+# Correlation between customer age and guest checkout. NAs in customer age are correlated 1 in guest checkouts. 
+table(is.na(dat$customer_age), dat$guest_checkout, 
+      dnn = c("customer_age is NA", "guest_checkout"))
 
+table(is.na(dat$account_age_days), dat$guest_checkout, 
+      dnn = c("customer_age is NA", "guest_checkout"))
+
+# Correlation matrix on raw data - check feature redundancy
+feature_matrix <- cor(dat[, sapply(dat, is.numeric) & names(dat) != "returned"],
+                      use = "pairwise.complete.obs")
+corrplot(feature_matrix, method = "color", tl.cex = 0.6)
+
+# Correlation with target variable
+target_cor <- cor(dat[, sapply(dat, is.numeric)],
+                  use = "pairwise.complete.obs")[, "returned"]
+sort(target_cor, decreasing = TRUE)
 
 # Split the data ----------------------------------------------------------
 
@@ -67,194 +68,90 @@ datTrain <- dat[train, ]
 datTest <- dat[-train, ]
 
 
-# Check for correlated variables  -----------------------------------------
+# Data Cleaning  ----------------------------------------
 
-# Checking the correlation in NAs between customer_age and guest_checkout. The gust_checkout variable is a binary variable that indicates whether the customer checked out as a guest (1) or not (0). If the customer checked out as a guest, then we don't have information about their age, which is why we see NAs in the customer_age variable for those cases._
-table(is.na(datTrain$customer_age), datTrain$guest_checkout, 
-      dnn = c("customer_age is NA", "guest_checkout"))
+data_cleaning <- function(df) {
+  
+  # Make negative ages into NAs
+  df$customer_age[df$customer_age < 13] <- NA
+  
+  # Clean up payment method 
+  df$payment_method <- factor(tolower(as.character(df$payment_method))) 
+  df$payment_method <- recode(df$payment_method, "credit card - visa" = "visa")
+  
+  # Make guest_checkout a 0/1 variable
+  df$guest_checkout <- as.integer(df$guest_checkout == "True")
+  
+  # Remove product subcategory - too complex
+  df$product_subcategory <- NULL
+  
+  # Remove unuseful variables
+  df$transaction_id <- NULL
+  df$customer_id <- NULL
+  
+  return(df)
+  
+}
 
-table(is.na(datTrain$account_age_days), datTrain$guest_checkout, 
-      dnn = c("customer_age is NA", "guest_checkout"))
-
-
-# Make feature ----------------------------------------
-
-str(datTrain)
-
-#======================================================================
-# Feature engineering for timestamp variable
-
-# Make timestamp a date format 
-# Train
-datTrain$transaction_timestamp <- ymd_hms(as.character(datTrain$transaction_timestamp))
-class(datTrain$transaction_timestamp)
-# Test 
-datTest$transaction_timestamp <- ymd_hms(as.character(datTest$transaction_timestamp))
-class(datTest$transaction_timestamp)
-
-# Add feature variables for the timestamp 
-# Train
-datTrain$hour_of_day <- hour(datTrain$transaction_timestamp)
-datTrain$day_of_week <- wday(datTrain$transaction_timestamp, label = FALSE) #1 is sun, 7 is sat
-datTrain$month <- month(datTrain$transaction_timestamp)
-datTrain$is_weekend <- as.integer(wday(datTrain$transaction_timestamp) %in% c(1, 7)) #1 if = 1 or 7, 0 otherwise
-datTrain$transaction_timestamp <- NULL
-# Test 
-datTest$hour_of_day <- hour(datTest$transaction_timestamp)
-datTest$day_of_week <- wday(datTest$transaction_timestamp, label = FALSE)
-datTest$month <- month(datTest$transaction_timestamp)
-datTest$is_weekend <- as.integer(wday(datTest$transaction_timestamp) %in% c(1,7))
-datTest$transaction_timestamp <- NULL
-
-str(datTrain[, c("hour_of_day", "day_of_week", "month", "is_weekend")])
-str(datTest[, c("hour_of_day", "day_of_week", "month", "is_weekend")])
-
-#==================================================================
-
-# Feature engineer customer age 
-
-# Check distribution and range for ages for abnormalities 
-summary(datTrain$customer_age) # negative values for ages - data quality issue 
-hist(datTrain$customer_age, breaks = 20, main = "Customer Age Distribution")
-sum(datTrain$customer_age < 0, na.rm = TRUE) # Only 25 out of 10491 NAs are negative values. We can set these to NA because they are likely data entry errors.
-range(datTrain$customer_age, na.rm = TRUE)
-table(datTrain$customer_age[datTrain$customer_age > 0]) # This shows there are entries less than 18. Count them 
-sum(datTrain$customer_age < 13, na.rm = TRUE) # 519 rows less than 13 years old. 1256 rows for less than 18 years old. 
-sum(datTrain$customer_age == 6, na.rm = TRUE) # Counting how many rows for each age less than 18. Cutoff for real ages is 13. 
+datTrain <- data_cleaning(datTrain)
+datTest <- data_cleaning(datTest)
 
 
-# Set negative values and values less than 13 to NA.
-# Train
-datTrain$customer_age[datTrain$customer_age < 13] <- NA 
-# Test 
-datTest$customer_age[datTest$customer_age < 13] <- NA
+# Feature Engineering  ----------------------------------------------------
 
-# Bin ages for Lasso ONLY 
-# Train
-datTrain$customer_age_bin <- cut(datTrain$customer_age,
-                                 breaks = c(-Inf, 18, 30, 45, 60, Inf), 
-                                 labels = c("Under 18", "18-30", "31-45", "46-60", "Over 60"),
-                                 right = FALSE)
-table(datTrain$customer_age_bin, useNA = "always") # NAs are guests and people less than 13 y/o 
-datTrain$customer_age <- NULL
-# Test
-datTest$customer_age_bin <- cut(datTest$customer_age,
-                                breaks = c(-Inf, 18, 30, 45, 60, Inf), 
-                                labels = c("Under 18", "18-30", "31-45", "46-60", "Over 60"),
-                                right = FALSE)
-table(datTest$customer_age_bin, useNA = "always") # NAs are guests  
-datTest$customer_age <- NULL
+data_features <- function(df) {
+  
+  # Make timestamps a date-time object 
+  df$transaction_timestamp <- ymd_hms(as.character(df$transaction_timestamp))
+  
+  # Make timestamps feature variables
+  df$hour_of_day <- hour(df$transaction_timestamp)
+  df$day_of_week <- wday(df$transaction_timestamp)
+  df$month <- month(df$transaction_timestamp)
+  df$is_weekend <- as.integer(wday(df$transaction_timestamp) %in% c(1, 7))
+  #Remove unfeatured transaction timestamp
+  df$transaction_timestamp <- NULL
+  
+  # Make zip code features
+  df$zip_region <- cut(as.integer(substr(df$zip_code, 1, 1)),
+                       breaks = c(-Inf, 2, 4, 6, 7, Inf),
+                       labels = c("Northeast", "Southeast", "Midwest", "South", "West"),
+                       right = TRUE)
+  #Remove unfeatured zip code
+  df$zip_code <- NULL
+  
+  # Make promo features 
+  df$promo_FREESHIP  <- as.integer(grepl("FREESHIP",  as.character(df$applied_promo_codes))) # 0 is not used, 1 if applied 
+  df$promo_NEWUSER   <- as.integer(grepl("NEWUSER",   as.character(df$applied_promo_codes)))
+  df$promo_SAVE20    <- as.integer(grepl("SAVE20",    as.character(df$applied_promo_codes)))
+  df$promo_WINTER50  <- as.integer(grepl("WINTER50",  as.character(df$applied_promo_codes)))
+  # Remove unfeatured promo codes
+  df$applied_promo_codes <- NULL
+  
+  # Bin Customer Age into categories
+  df$customer_age_bin <- cut(df$customer_age,
+                             breaks = c(-Inf, 18, 30, 45, 60, Inf), 
+                             labels = c("Under18", "18to30", "31to45", "46to60", "Over60"),
+                             right = FALSE)
+  # Remove unbinned cusomter age
+  df$customer_age <- NULL
+  
+  # Bin account_age_days into categories
+  df$account_age_bin <- cut(df$account_age_days,
+                            breaks = c(-Inf, 104, 250, 504, Inf),
+                            labels = c("New", "Developing", "Established", "Loyal"),
+                            right = FALSE)
+  # Remove unbinned account_age_days
+  df$account_age_days <- NULL
+  
+  return(df)
+}
 
-# =======================================
+datTrain <- data_features(datTrain)
+datTest <- data_features(datTest)
 
-# Remove the account_age_bins since they are highly correlated with loyalty tier and they are not in the test data.
-#table(datTrain$loyalty_tier, datTrain$account_age_bin)
-# Checking the correlation between the two variables. Here I had to temporarity make that account_age_bin since I deleted it during the dummy process 
-#account_age_bin_temp <- cut(dat$account_age_days,
-                            #breaks = c(-Inf, 104, 250, 504, Inf),
-                            #labels = c("New", "developing", "established", "loyal"),
-                            #right = FALSE)
-#Checking correlation 
-#table(dat$loyalty_tier, account_age_bin_temp)
-#str(datTrain)
+# Dummy variables --------------------------------------
 
-# Train
-datTrain$account_age_days <- NULL
-# Test 
-datTest$account_age_days <- NULL
-
-#=====================================
-
-# Promo Code features 
-#Train
-levels(datTrain$applied_promo_codes) # This shows how there are only 4 levels, but they are used in many combinations 
-datTrain$promo_FREESHIP  <- as.integer(grepl("FREESHIP",  as.character(datTrain$applied_promo_codes))) # 0 is not used, 1 if applied 
-datTrain$promo_NEWUSER   <- as.integer(grepl("NEWUSER",   as.character(datTrain$applied_promo_codes)))
-datTrain$promo_SAVE20    <- as.integer(grepl("SAVE20",    as.character(datTrain$applied_promo_codes)))
-datTrain$promo_WINTER50  <- as.integer(grepl("WINTER50",  as.character(datTrain$applied_promo_codes)))
-datTrain$applied_promo_codes <- NULL
-#Test
-levels(datTest$applied_promo_codes)
-datTest$promo_FREESHIP  <- as.integer(grepl("FREESHIP",  as.character(datTest$applied_promo_codes))) # 0 is not used
-datTest$promo_NEWUSER   <- as.integer(grepl("NEWUSER",   as.character(datTest$applied_promo_codes)))
-datTest$promo_SAVE20    <- as.integer(grepl("SAVE20",    as.character(datTest$applied_promo_codes)))
-datTest$promo_WINTER50  <- as.integer(grepl("WINTER50",  as.character(datTest$applied_promo_code)))
-datTest$applied_promo_codes <- NULL
-
-# High Cat Var Cleaning --------------------------------------------------
-
-#==============================
-
-# Payment method cleaning 
-unique(datTrain$payment_method) # Shows that there are Paypal and paypal or Visa and visa. Needs to be fixed
-levels(datTest$payment_method) # Same issue with the test data.
-# Standardize to lower case
-# Train
-datTrain$payment_method <- factor(tolower(as.character(datTrain$payment_method)))
-levels(datTrain$payment_method) # Now we have only paypal and visa.
-# Test 
-datTest$payment_method <- factor(tolower(as.character(datTest$payment_method)))
-levels(datTest$payment_method) # Same for test data.)
-# Merge credit card - visa as visa 
-# Train
-datTrain$payment_method <- recode(datTrain$payment_method, "credit card - visa" = "visa")
-levels(datTrain$payment_method) 
-# Test 
-datTest$payment_method <- recode(datTest$payment_method, "credit card - visa" = "visa")
-levels(datTest$payment_method)
-
-#==============================
-
-# Zip code cleaning 
-length(unique(datTrain$zip_code))
-table(datTrain$product_subcategory)
-table(datTrain$product_category, datTrain$product_subcategory)
-
-sort(unique(datTrain$zip_code))
-datTrain$zip_region <- cut(as.integer(substr(datTrain$zip_code, 1, 1)),
-                           breaks = c(-Inf, 2, 4, 6, 7, Inf),
-                           labels = c("Northeast", "Southeast", "Midwest", "South", "West"),
-                           right = TRUE)
-datTrain$zip_code <- NULL
-table(datTrain$zip_region)
-
-datTest$zip_region <- cut(as.integer(substr(datTest$zip_code, 1, 1)),
-                          breaks = c(-Inf, 2, 4, 6, 7, Inf),
-                          labels = c("Northeast", "Southeast", "Midwest", "South", "West"),
-                          right = TRUE)
-
-table(datTest$zip_region)
-datTest$zip_code <- NULL
-
-#==============================
-
-# Dropping variables that are too complex or not useful 
-datTrain$product_subcategory <- NULL
-datTest$product_subcategory <- NULL
-
-# Removing variables that are not useful for prediction 
-# Train
-datTrain$transaction_id <- NULL
-datTrain$customer_id <- NULL
-# Test
-datTest$transaction_id <- NULL
-datTest$customer_id <- NULL
-
-# Dummy variables for cat variables  --------------------------------------
-
-# ================================
-
-# Guest checkout variable
-
-# Making the guest_checkout variable from FALSE/TRUE to 0/1 
-#Train
-datTrain$guest_checkout <- as.integer(datTrain$guest_checkout == "True") 
-# Test
-datTest$guest_checkout <- as.integer(datTest$guest_checkout == "True")
-
-# ==============================
-
-# Make the dummies for everything else. 
 # Train
 datTrain <- dummy_cols(datTrain, 
                        select_columns = c(
@@ -263,6 +160,7 @@ datTrain <- dummy_cols(datTrain,
                          "loyalty_tier",
                          "payment_method",
                          "customer_age_bin",
+                         "account_age_bin",
                          "zip_region"
                        ),
                        remove_first_dummy = TRUE, # Avoid dummy variable trap
@@ -275,50 +173,39 @@ datTest <- dummy_cols(datTest,
                         "loyalty_tier",
                         "payment_method",
                         "customer_age_bin",
+                        "account_age_bin",
                         "zip_region"
                       ),
                       remove_first_dummy = TRUE, # Avoid dummy variable trap
                       remove_selected_columns = TRUE) # Remove original columns after creating dummies
-
-str(datTest)
 
 #Checking if those with no Loyalty tier are the guest checkout people. They are so I am removing the former  
 table(datTrain$loyalty_tier_None, datTrain$guest_checkout) # hey are so I am removing the former  
 datTrain$loyalty_tier_None <- NULL
 datTest$loyalty_tier_None <- NULL
 
-str(datTrain)      
+# Checking if account_age_bin_NA/customer_age_bin_NA are identical to guest_checkout. If so, removing the former. 
+table(datTrain$account_age_bin_NA, datTrain$guest_checkout)
+table(datTrain$customer_age_bin_NA, datTrain$guest_checkout)
+
+datTrain$account_age_bin_NA <- NULL
+datTrain$customer_age_bin_NA <- NULL
+
+datTest$account_age_bin_NA <- NULL
+datTest$customer_age_bin_NA <- NULL
 
 sum(table(names(datTest) == names(datTrain))) # Checking if the names of the variables are the same in both datasets. They are.es
 
-#====================
+# Making NAs 0s after processing -----------------------------
 
-# Cleaning Customer AGE = NAs from making ages < 13 as NA. They should be 0 
-# Train
-age_bin_cols <- grep("customer_age_bin", names(datTrain), value = TRUE)
-datTrain[, age_bin_cols][is.na(datTrain[, age_bin_cols])] <- 0
-# Test
-age_bin_cols_test <- grep("customer_age_bin", names(datTest), value = TRUE)
-datTest[, age_bin_cols_test][is.na(datTest[, age_bin_cols_test])] <- 0
+bin_cols <- grep("_bin_", names(datTrain), value = TRUE)
+datTrain[, bin_cols][is.na(datTrain[, bin_cols])] <- 0
+
+bin_cols_test <- grep("_bin_", names(datTest), value = TRUE)
+datTest[, bin_cols_test][is.na(datTest[, bin_cols_test])] <- 0
 
 sum(is.na(datTrain))  # should return 0
 sum(is.na(datTest))   # should return 0
-
-# Correlation  --------------------------------------------------------------------
-sum(datTrain$returned == 1) / nrow(datTrain)
-str(datTrain)
-
-
-# Find the correlation matrix for the numeric variables except the outcome variable - determins redundancy in the variables 
-feature_matrix <- cor(datTrain[, sapply(datTrain, is.numeric) & names(datTrain) != "returned"],
-                      use = "pairwise.complete.obs")
-
-corrplot(feature_matris, method = "color", tl.cex = 0.6)
-
-# Finds correlations with target variable
-target_cor <- cor(datTrain[, sapply(datTrain, is.numeric)],
-                  use = "pairwise.complete.obs")[, "returned"]
-sort(target_cor, decreasing = TRUE)
 
 
 # SMOTE for Class Balance -------------------------------------------------
@@ -358,56 +245,41 @@ datTrain_smote$returned <- as.factor(datTrain_smote$returned)
 # Logistic Regression Baseline model  -------------------------------------
 
 m1_lr_full <- glm(returned ~ ., data = datTrain, family = binomial)
+summary(m1_lr_full)
 
-summary(m1_lr_full) # Tells me which variables are significant based on p < 0.05 
+# Train AUC
+probs_lr_full <- predict(m1_lr_full, newdata = datTrain, type = "response")
+roc_lr_full <- roc(datTrain$returned, probs_lr_full, plot = TRUE, grid = TRUE, col = "blue")
+auc_lr_full <- auc(roc_lr_full)
 
-# Make predictions to find the AUC
-probs_lr_full <- predict(m1_lr_full, newdata = datTrain, type = "response") # Probs that return = 1 given the model 
-roc_lr_full <- roc(datTrain$returned, probs_lr_full, plot = TRUE, grid = TRUE, col = "blue", main = "ROC Curve for Logistic Regression Full Model")
-auc_lr_full <- auc(roc_lr_full) # 0.713
+# Test AUC
+probs_lr_full_test <- predict(m1_lr_full, newdata = datTest, type = "response")
+roc_lr_full_test <- roc(datTest$returned, probs_lr_full_test, plot = TRUE, grid = TRUE, col = "red")
+auc_lr_full_test <- auc(roc_lr_full_test)
 
-pros_lr_full_test <- predict(m1_lr_full, newdata = datTest, type = "response")
-roc_lr_full_test <- roc(datTest$returned, pros_lr_full_test, plot = TRUE, grid = TRUE, col = "red", main = "ROC Curve for Logistic Regression Full Model")
-auc_lr_full_test <- auc(roc_lr_full_test) # 0.7144.
-
-lr_full_auc <- c(Train = 0.713, Test = 0.7144)
-
+# Results table
 results <- data.frame(
-  Model = c("Baseline Logistic Regression"),
-  Train_AUC = c(0.713),
-  Test_AUC = c(0.7144)
+  Model = "Baseline Logistic Regression",
+  Train_AUC = as.numeric(auc_lr_full),
+  Test_AUC = as.numeric(auc_lr_full_test)
 )
 results
-
 # Variable Selection ------------------------------------------------------
 
-#==========================
-# Lasso variable Selection 
-#==========================
+# Lasso variable Selection ==========================
 
-# Prepare data - glmnet requires matrix format for predictors 
-datTrain['y'] <- datTrain$returned
-sum(datTrain['y'] != datTrain["returned"]) 
-datTrain$returned <- NULL
+# Prepare matrices 
+x_matrix <- as.matrix(datTrain[, !names(datTrain) %in% "returned"])
+y_target  <- as.numeric(datTrain$returned)
 
-datTest['y'] <- datTest$returned
-sum(datTest['y'] != datTest["returned"])
-datTest$returned <- NULL
-
-names(datTrain == "returned")
-names(datTest == "returned")
-
-x_matrix <- as.matrix(datTrain[, 1:(ncol(datTrain)-1)])
-y_target <- datTrain$y
-
-# fit model with lasso penalty alpha = 1
-
-fitLasso <- glmnet(x = x_matrix, 
+# Fit Lasso
+fitLasso <- glmnet(x = x_matrix,
                    y = y_target,
-                   family = "binomial", 
-                   alpha = 1, 
+                   family = "binomial",
+                   alpha = 1,
                    standardize = TRUE)
 
+# Checking coefficients at different lambda values
 par(mfrow = c(1, 2))
 plot(fitLasso, xvar = "lambda", label = TRUE) # smaller the -log(lambda), the larger the lamba and greater penalty --> coefficients go to 0 
 plot(fitLasso, xvar = "norm", label = TRUE) # sum of coefficients. The smaller the norm, the greater the penalty and more coefficients go to 0.
@@ -418,176 +290,131 @@ dim(betaHat) # left columns are bigger lamba (high penalty), gets smaller as it 
 # FREESHIP stays is chosen even with high penalty, so it is likely an important variable.
 apply(betaHat, 2, function(x) sum(x != 0)) # Shows how many variables are included in the model at each lambda value. The smaller the lambda, the more variables are included. )
 beta_last <- betaHat[, ncol(betaHat)]
-names(beta_last[beta_last == 0])
+names(beta_last[beta_last == 0]) # These variables never enter the model, not even at the lowest penalty 
 sum(beta_last == 0) # 48 variables have coefficients of 0 at the last lambda value, which is the smallest lambda value and therefore the least penalty.
 
-#=====================
-# CV Lasso 
-#=====================
+
+#CV Lasso =====================
 
 set.seed(42) 
-fid <- sample(1:10, size = nrow(datTrain), replace = TRUE) # Create 10 folds for cross validation. Each row is randomly assigned a number from 1 to 10.))
+fid <- sample(1:10, size = nrow(datTrain), replace = TRUE)
 cl <- makePSOCKcluster(detectCores()-1)
 registerDoParallel(cl)
 
-cvlasso <- cv.glmnet(x = x_matrix, 
+cvLasso <- cv.glmnet(x = x_matrix, 
                      y = y_target,
                      family = "binomial",
                      alpha = 1, 
                      type.measure = "auc",
-                     paralle = TRUE, 
-                     nfolds = 10, foldid = fid)
+                     parallel = TRUE,  # fixed typo: paralle -> parallel
+                     nfolds = 10, 
+                     foldid = fid)
 stopCluster(cl) 
+
 par(mfrow = c(1,1))
-plot(cvlasso)
-# smallest lambda value 
-cvlasso$lambda.min
-log(cvlasso$lambda.min) # corresponds to the most right vertical line 
+plot(cvLasso)
 
-# Lambda selected by one standard deviation rule
-cvlasso$lambda.1se
-log(cvlasso$lambda.1se) # corresponds to the middle vertical line
-coef(cvlasso, s = "lambda.min") # Shows the coefficients for each variable at the lambda value that minimizes the mean cross-validated error. 17 variables have non-zero coefficients at this lambda value.sso)
-coef(cvlasso, s = "lambda.1se") # Shows the coefficients for each variable at the lambda value that is one standard error above the minimum. 10 variables have non-zero coefficients at this lambda value.
+cvLasso$lambda.min
+log(cvLasso$lambda.min)
+cvLasso$lambda.1se
+log(cvLasso$lambda.1se)
 
-# Predicting using the cvlasso
-levels(as.factor(datTest$y))
-ncol(datTest[, -ncol(datTest)]) # testdata with only the predictors  
-x_test <- as.matrix(datTest[, -ncol(datTest)])
-probs_cvlasso_min <- predict(cvlasso, newx = x_test, s = "lambda.min", type = "response")
-probs_cvlasso_1se <- predict(cvlasso, newx = x_test, s = "lambda.1se", type = "response")
+coef(cvLasso, s = "lambda.min")
+coef(cvLasso, s = "lambda.1se")
 
-roc_cvlasso_min <- roc(datTest$y, as.vector(probs_cvlasso_min), plot = TRUE, grid = TRUE, col = "green", main = "ROC Curve for CV Lasso Model")
-auc(roc_cvlasso_min) # 0.7138
-roc_cvlasso_1se <- roc(datTest$y, as.vector(probs_cvlasso_1se), plot = TRUE, grid = TRUE, col = "orange", main = "ROC Curve for CV Lasso Model")
-auc(roc_cvlasso_1se) #0.7079
+# Predict on test data
+x_matrix_test <- as.matrix(datTest[, !names(datTest) %in% "returned"])
 
-results <- data.frame(
-  Models = c('Baseline Logistic Regression', 'CV Lasso (lambda.min)', 'CV Lasso (lambda.1se)'),
-  Train_AUC = c(0.713, NA, NA),
-  Test_AUC = c(0.7144, 0.7138, 0.7079)
-)
-results
+probs_cvlasso_min <- predict(cvLasso, newx = x_matrix_test, s = "lambda.min", type = "response")
+probs_cvlasso_1se <- predict(cvLasso, newx = x_matrix_test, s = "lambda.1se", type = "response")
 
+roc_cvlasso_min <- roc(datTest$returned, as.vector(probs_cvlasso_min), 
+                       plot = TRUE, grid = TRUE, col = "green")
+auc_cvlasso_min <- auc(roc_cvlasso_min)
 
-# Decision Trees Analysis -------------------------------------------------
+roc_cvlasso_1se <- roc(datTest$returned, as.vector(probs_cvlasso_1se), 
+                       plot = TRUE, grid = TRUE, col = "orange")
+auc_cvlasso_1se <- auc(roc_cvlasso_1se)
 
-# Reloading the data and splitting it just for decision trees preprocessing 
-dat <- read.csv("returns_train.csv", stringsAsFactors = TRUE)
-set.seed(42)
-train <- sample(1:nrow(dat), nrow(dat)*0.7)
-datTrain_tree <- dat[train, ]
-datTest_tree  <- dat[-train, ]
-
-# Preprocessing function for decision trees
-
-preprocess_tree <- function(df) {
-  #Drop ID columns 
-  df$transaction_id <- NULL
-  df$customer_id <- NULL
-  
-  #Timempstamps features
-  df$transaction_timestamp <- ymd_hms(as.character(df$transaction_timestamp))
-  df$hour_of_day <- hour(df$transaction_timestamp)
-  df$day_of_week <- wday(df$transaction_timestamp, label = FALSE) 
-  df$month <- month(df$transaction_timestamp)
-  df$is_weekend <- as.integer(wday(df$transaction_timestamp) %in% c(1,7))
-  df$transaction_timestamp <- NULL
-  
-  # Fix customer_age - remove invalid ages
-  df$customer_age[df$customer_age < 13] <- NA
-  
-  # Drop account_age_days - perfectly correlated with loyatly tier 
-  df$account_age_days <- NULL
-  
-  # Fix payment_method casing and merge visa variands
-  df$payment_method <- factor(tolower(as.character(df$payment_method)))
-  df$payment_method <- recode(df$payment_method, "credit card - visa" = "visa")
-  
-  # Drop product subcategory - too many levels, product category will capture signal
-  df$product_subcategory <- NULL
-  
-  # Promo code features 
-  df$promo_FREESHIP  <- as.integer(grepl("FREESHIP",  as.character(df$applied_promo_codes)))
-  df$promo_NEWUSER   <- as.integer(grepl("NEWUSER",   as.character(df$applied_promo_codes)))
-  df$promo_SAVE20    <- as.integer(grepl("SAVE20",    as.character(df$applied_promo_codes)))
-  df$promo_WINTER50  <- as.integer(grepl("WINTER50",  as.character(df$applied_promo_codes)))
-  df$applied_promo_codes <- NULL
-  
-  # Zip region
-  df$zip_region <- cut(as.integer(substr(df$zip_code, 1, 1)),
-                        breaks = c(-Inf, 2, 4, 6, 7, Inf),
-                        labels = c("Northeast", "Southeast", "Midwest", "South", "West"),
-                        right = TRUE)
-  df$zip_code <- NULL
-  
-  # Make returned a factor for clarrification 
-  df$returned <- factor(df$returned, levels = c(0, 1), labels = c("No", "Yes"))
-  
-  return(df)
-}
-
-# Apply processing to both training and test data 
-datTrain_tree <- preprocess_tree(datTrain_tree)
-datTest_tree <- preprocess_tree(datTest_tree)
-str(datTrain_tree)
-
-# Full decision tree with no pruning (cp =0)
-tr1 <- rpart(returned~., data = datTrain_tree, method = "class", control = rpart.control(cp = 0))
-tr1$cptable
-# Minimum 10 fold CV error 
-min.cv <- which.min(tr1$cptable[,4])
-tr1$cptable[min.cv,4]
-# 1-SD deviation rule 
-sel <- which(tr1$cptable[,4] < tr1$cptable[min.cv,4] + tr1$cptable[min.cv,5]) 
-sel # gives me the indeces of the CV which are less than the minimum CV error + 1 SD. 
-tr1$cptable[sel, ] 
-cps <- tr1$cptable[min(sel), 1] # Biggest Complexity parameter that is within 1 SD of the minimum CV error. This will create a smaller (less complex tree) that is good to use 
-# DT with min CV error 
-tr_min <- prune(tr1, cp = tr1$cptable[min.cv, 1])
-# DT with 1 SD rule 
-tr_1se <- prune(tr1, cp = cps)
-
-# Prdictions with the two pruned trees 
-# min CV error tree 
-probs_tr_min <- predict(tr_min, newdata = datTest_tree, type = "prob")
-probs_tr_min
-probs_tr_min[,2]
-roc_tr_min <- roc(datTest_tree$returned, probs_tr_min[,2], plot = TRUE, grid = TRUE)
-auc_tr_min <- auc(roc_tr_min) # 0.6799
-# 1 SD tree
-probs_tr_1se <- predict(tr_1se, newdata = datTest_tree, type = "prob")
-roc_tr_1se <- roc(datTest_tree$returned, probs_tr_1se[,2], plot = TRUE, grid = TRUE)
-auc_tr_1se <- auc(roc_tr_1se)
+# Update results table with actual AUC values
 results <- rbind(results, data.frame(
-  Models = c('Decision Tree (min CV error)', 'Decision Tree (1 SD rule)'),
+  Model = c("CV Lasso (lambda.min)", "CV Lasso (lambda.1se)"),
   Train_AUC = c(NA, NA),
-  Test_AUC = c(auc_tr_min, auc_tr_1se)
+  Test_AUC = c(as.numeric(auc_cvlasso_min), as.numeric(auc_cvlasso_1se))
 ))
 results
 
+## Decision Trees Analysis -------------------------------------------------
+
+# Convert returned to factor for classification tree
+datTrain$returned <- factor(datTrain$returned, levels = c(0,1), labels = c("No", "Yes"))
+datTest$returned  <- factor(datTest$returned,  levels = c(0,1), labels = c("No", "Yes"))
+
+# Full decision tree with no pruning
+tr1 <- rpart(returned ~., data = datTrain, method = "class", 
+             control = rpart.control(cp = 0))
+
+tr1$cptable
+# Minimum 10 fold CV error 
+min.cv <- which.min(tr1$cptable[, 4])
+tr1$cptable[min.cv, 4]
+
+# 1-SE rule 
+sel <- which(tr1$cptable[, 4] < tr1$cptable[min.cv, 4] + tr1$cptable[min.cv, 5])[12]
+cps <- tr1$cptable[sel, 1]
+
+# Pruned trees
+tr_min <- prune(tr1, cp = tr1$cptable[min.cv, 1])
+tr_1se <- prune(tr1, cp = cps)
+
+# Predictions
+probs_tr_min <- predict(tr_min, newdata = datTest, type = "prob")
+roc_tr_min   <- roc(datTest$returned, probs_tr_min[, 2], plot = TRUE, grid = TRUE)
+auc_tr_min   <- auc(roc_tr_min)
+
+probs_tr_1se <- predict(tr_1se, newdata = datTest, type = "prob")
+roc_tr_1se   <- roc(datTest$returned, probs_tr_1se[, 2], plot = TRUE, grid = TRUE)
+auc_tr_1se   <- auc(roc_tr_1se)
+
+# Update results
+results <- rbind(results, data.frame(
+  Model = c("Decision Tree (min CV)", "Decision Tree (1SE rule)"),
+  Train_AUC = c(NA, NA),
+  Test_AUC = c(as.numeric(auc_tr_min), as.numeric(auc_tr_1se))
+))
+results
 
 # RandomForest  -----------------------------------------------------------
 
-class(datTrain_tree$returned)
-set.seed(42)
+class(datTrain$returned)
 
+# Fixing column names for RF 
+colnames(datTrain) <- make.names(colnames(datTrain))
+colnames(datTest) <- make.names(colnames(datTest))
+colnames(x_matrix) <- make.names(colnames(x_matrix))
+colnames(x_matrix_test) <- make.names(colnames(x_matrix_test))
+
+set.seed(42)
 rf <- randomForest(returned ~., 
-                   data = datTrain_tree,
-                   mtry = floor(sqrt(ncol(datTrain_tree)-1)),
+                   data = datTrain,
+                   mtry = floor(sqrt(ncol(datTrain)-1)),
                    ntree = 500, 
                    importance = TRUE,
                    na.action = na.roughfix)
 
-probs_rf <- predict(rf, newdata = na.roughfix(datTest_tree), type = "prob")
-roc_rf <- roc(datTest_tree$returned, probs_rf[,2], plot = TRUE, grid = TRUE)
-auc_rf <- auc(roc_rf)
+# Predictions on test data
+probs_rf <- predict(rf, newdata = na.roughfix(datTest), type = "prob")
+roc_rf   <- roc(datTest$returned, probs_rf[, 2], plot = TRUE, grid = TRUE)
+auc_rf   <- auc(roc_rf)
+
+# Update results - fix column name Model not Models
 results <- rbind(results, data.frame(
-  Models = 'Random Forest',
+  Model = "Random Forest",
   Train_AUC = NA,
-  Test_AUC = auc_rf
+  Test_AUC = as.numeric(auc_rf)
 ))
 results
+
 
 plot(roc_rf, grid = c(0.1, 0.1), col = "forestgreen")
 plot(roc_tr_min, add = TRUE, col = "red")
@@ -624,70 +451,193 @@ table(pred_rf_sm_class, datTest$returned)
 
 # XGBoost Model -----------------------------------------------------------
 
-library(xgboost)
+# Making Return Varible a integer for XGBoost
+datTrain$returned <- as.integer(datTrain$returned) - 1
+datTest$returned  <- as.integer(datTest$returned) - 1
 
-x_train_xgb <- matrix(as.numeric(as.matrix(datTrain_smote[, !names(datTrain_smote) %in% "returned"])),
-                      nrow = nrow(datTrain_smote))
 
-colnames(x_train_xgb) <- names(datTrain_smote)[names(datTrain_smote) != "returned"]
+xgb <- xgboost(x = x_matrix,
+                y = factor(y_target),          # convert to factor for binary classification
+                objective = "binary:logistic",
+                learning_rate = 0.05,          # renamed from eta
+                min_split_loss = 0,            # renamed from gamma
+                max_depth = 4,
+                min_child_weight = 1,
+                eval_metric = "auc",
+                nthread = 4,
+                nrounds = 500,
+                verbosity = 1)
 
-y_train_xgb <- as.numeric(as.character(datTrain_smote$returned))
-
-x_test_xgb <- matrix(as.numeric(as.matrix(datTest[, !names(datTest) %in% "returned"])),
-                     nrow = nrow(datTest))
-
-colnames(x_test_xgb) <- names(datTest)[names(datTest) != "returned"]
-
-y_test_xgb <- as.numeric(datTest$returned)
-
-# Convert to DMatrix format for XGBoost optimized data structure
-dtrain <- xgb.DMatrix(data = x_train_xgb, label = y_train_xgb)
-dtest <- xgb.DMatrix(data = x_test_xgb, label = y_test_xgb)
-
-dim(x_train_xgb)
-dim(x_test_xgb)
-
-# XGBoost parameters
-params <- list(
-  objective = "binary:logistic",  # binary classification
-  eval_metric = "auc",            # optimize for AUC
-  eta = 0.1,                      # learning rate
-  max_depth = 6,                  # tree depth
-  subsample = 0.8,                # row sampling per tree
-  colsample_bytree = 0.8          # column sampling per tree
-)
-
-# Train with cross validation to find optimal number of rounds
-set.seed(42)
-cv_xgb <- xgb.cv(
-  params = params,
-  data = dtrain,
-  nrounds = 500,
-  nfold = 5,
-  early_stopping_rounds = 20,    # stop if no improvement after 20 rounds
-  verbose = 1
-)
-
-# Best number of rounds
-best_nrounds <- which.max(cv_xgb$evaluation_log$test_auc_mean)
-best_nrounds
-
-# Train final model with best number of rounds
-set.seed(42)
-xgb_model <- xgb.train(
-  params = params,
-  data = dtrain, 
-  nround = best_nrounds, 
-  evals = list(train = dtrain, test = dtest),
-  verbose = 1
-)
-
-probs_xbg <- predict(xgb_model, newdata = dtest, type = "response")
-roc_xgb <- roc(y_test_xgb, probs_xbg, plot = TRUE, grid = TRUE)
+# Predictions 
+xgb.prob <- predict(xgb, x_matrix_test)
+roc_xgb <- roc(datTest$returned, xgb.prob, plot = TRUE, grid = TRUE)
 auc_xgb <- auc(roc_xgb)
 results <- rbind(results, data.frame(
-  Models = "XGBoost",
+  Model = "XGBoost",
   Train_AUC = NA,
-  Test_AUC = auc_xgb)
+  Test_AUC = as.numeric(auc_xgb)
+))
+results
+
+
+# CV XGBoost --------------------------------------------------------------
+
+# Create DMatrix first
+dtrain <- xgb.DMatrix(data = x_matrix, label = y_target)
+
+# CV with updated API
+xgbCV <- xgb.cv(
+  params = list(
+    objective = "binary:logistic",
+    learning_rate = 0.05,
+    min_split_loss = 0,
+    max_depth = 4,
+    min_child_weight = 1,
+    eval_metric = "auc",
+    nthread = 4
+  ),
+  data = dtrain,
+  nrounds = 500,
+  nfold = 10,
+  prediction = TRUE,
+  showsd = TRUE,
+  stratified = TRUE,
+  print_every_n = 10,
+  early_stopping_rounds = 10
 )
-results  
+# Getting the best number of rounds based on CV results
+best_nrounds <- which.max(xgbCV$evaluation_log$test_auc_mean)
+best_nrounds
+# Train final model with best nrounds
+xgb_final <- xgboost(x = x_matrix,
+                     y = factor(y_target),
+                     objective = "binary:logistic",
+                     learning_rate = 0.05,
+                     min_split_loss = 0,
+                     max_depth = 4,
+                     min_child_weight = 1,
+                     nrounds = best_nrounds,
+                     verbosity = 0)
+# Predictions with final model
+xgb_cv_prob <- predict(xgb_final, x_matrix_test)
+roc_xgb_cv <- roc(datTest$returned, xgb_cv_prob, plot = TRUE, grid = TRUE)
+auc_xgb_cv <- auc(roc_xgb_cv)
+results <- rbind(results, data.frame(
+  Model = "XGBoost CV",
+  Train_AUC = NA,
+  Test_AUC = as.numeric(auc_xgb_cv)
+))
+results 
+
+
+# Automated XGBoost Tuning  -----------------------------------------------
+install.packages("tidymodels")
+library(tidymodels)
+install.packages("finetune")
+library(finetune)
+
+# Prepare data
+xgb_data <- as.data.frame(x_matrix)
+xgb_data$returned <- factor(ifelse(y_target == 1, "Yes", "No"), 
+                            levels = c("No", "Yes"))
+
+# Define model spec with tunable parameters
+xgb_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  min_n = tune(),
+  sample_size = tune(),
+  mtry = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+# CV folds
+set.seed(42)
+cv_folds <- vfold_cv(xgb_data, v = 10, repeats = 3, strata = returned)
+
+# Random search grid
+set.seed(42)
+xgb_grid <- grid_random(
+  trees(range = c(100, 1000)),
+  tree_depth(range = c(3, 10)),
+  learn_rate(range = c(-3, -1)),  # log10 scale: 0.001 to 0.1
+  loss_reduction(range = c(0, 10)),
+  min_n(range = c(1, 20)),
+  sample_size = sample_prop(range = c(0.5, 1.0)),
+  mtry(range = c(5, 30)),
+  size = 100  # 100 random combinations
+)
+
+# Workflow
+xgb_workflow <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_formula(returned ~ .)
+
+# Tune
+library(doParallel)
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+start <- Sys.time()
+set.seed(42)
+xgb_tuned <- tune_grid(
+  xgb_workflow,
+  resamples = cv_folds,
+  grid = xgb_grid,
+  metrics = metric_set(roc_auc),
+  control = control_grid(verbose = TRUE, allow_par = TRUE)
+)
+stopCluster(cl)
+print(Sys.time() - start)
+
+# Best parameters
+show_best(xgb_tuned, metric = "roc_auc", n = 5)
+select_best(xgb_tuned, metric = "roc_auc")
+
+# Final model with best parameters
+xgb_final_spec <- boost_tree(
+  trees = 978,
+  tree_depth = 7,
+  learn_rate = 0.0133,
+  loss_reduction = 8.11,
+  min_n = 10,
+  sample_size = 0.857,
+  mtry = 27
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+# Final workflow
+xgb_final_workflow <- workflow() %>%
+  add_model(xgb_final_spec) %>%
+  add_formula(returned ~ .)
+
+# Train on full training data
+xgb_final_fit <- fit(xgb_final_workflow, data = xgb_data)
+
+# Prepare test data
+xgb_test_data <- as.data.frame(x_matrix_test)
+xgb_test_data$returned <- factor(ifelse(datTest$returned == 1, "Yes", "No"),
+                                 levels = c("No", "Yes"))
+
+# Predict on test data
+xgb_final_probs <- predict(xgb_final_fit, 
+                           new_data = xgb_test_data, 
+                           type = "prob")
+
+# AUC
+roc_xgb_tuned <- roc(datTest$returned, xgb_final_probs$.pred_Yes,
+                     plot = TRUE, grid = TRUE, col = "blue")
+auc_xgb_tuned <- auc(roc_xgb_tuned)
+auc_xgb_tuned
+
+# Add to results
+results <- rbind(results, data.frame(
+  Model = "XGBoost Tuned",
+  Train_AUC = NA,
+  Test_AUC = as.numeric(auc_xgb_tuned)
+))
+results
