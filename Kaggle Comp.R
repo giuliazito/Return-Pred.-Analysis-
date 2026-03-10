@@ -12,6 +12,8 @@ library(rpart)
 library(randomForest)
 library(smotefamily)
 library(xgboost)
+library(tidymodels)
+library(finetune)
 
 
 # Load Data ---------------------------------------------------------------
@@ -83,11 +85,15 @@ data_cleaning <- function(df) {
   df$guest_checkout <- as.integer(df$guest_checkout == "True")
   
   # Remove product subcategory - too complex
-  df$product_subcategory <- NULL
+  #df$product_subcategory <- NULL
   
   # Remove unuseful variables
   df$transaction_id <- NULL
   df$customer_id <- NULL
+  
+  df$loyalty_tier_ordinal<- as.integer(factor(as.character(df$loyalty_tier), 
+                                               levels = c("None", "Bronze", "Silver", "Gold", "Platinum")))
+  df$loyalty_tier <- NULL
   
   return(df)
   
@@ -109,6 +115,10 @@ data_features <- function(df) {
   df$day_of_week <- wday(df$transaction_timestamp)
   df$month <- month(df$transaction_timestamp)
   df$is_weekend <- as.integer(wday(df$transaction_timestamp) %in% c(1, 7))
+  df$hour_sin <- sin(2 * pi * df$hour_of_day / 24)
+  df$hour_cos <- cos(2 * pi * df$hour_of_day / 24)
+  df$day_sin  <- sin(2 * pi * df$day_of_week / 7)
+  df$day_cos  <- cos(2 * pi * df$day_of_week / 7)
   #Remove unfeatured transaction timestamp
   df$transaction_timestamp <- NULL
   
@@ -125,6 +135,7 @@ data_features <- function(df) {
   df$promo_NEWUSER   <- as.integer(grepl("NEWUSER",   as.character(df$applied_promo_codes)))
   df$promo_SAVE20    <- as.integer(grepl("SAVE20",    as.character(df$applied_promo_codes)))
   df$promo_WINTER50  <- as.integer(grepl("WINTER50",  as.character(df$applied_promo_codes)))
+  df$num_promos <- df$promo_FREESHIP + df$promo_NEWUSER + df$promo_SAVE20 + df$promo_WINTER50
   # Remove unfeatured promo codes
   df$applied_promo_codes <- NULL
   
@@ -143,12 +154,34 @@ data_features <- function(df) {
                             right = FALSE)
   # Remove unbinned account_age_days
   df$account_age_days <- NULL
+  #df$account_age_days[is.na(df$account_age_days)] <- 0
   
   return(df)
 }
 
 datTrain <- data_features(datTrain)
 datTest <- data_features(datTest)
+
+
+# Target Encoding for product_subcategory ---------------------------------
+
+# Calculate return rate per subcategory from TRAINING data only
+subcat_means <- datTrain %>%
+  group_by(product_subcategory) %>%
+  summarise(subcat_return_rate = mean(as.numeric(as.character(returned)), 
+                                      na.rm = TRUE))
+
+# Apply to both train and test
+datTrain <- left_join(datTrain, subcat_means, by = "product_subcategory")
+datTest  <- left_join(datTest,  subcat_means, by = "product_subcategory")
+
+# Handle unseen subcategories in test with global mean
+global_mean <- mean(as.numeric(as.character(datTrain$returned)), na.rm = TRUE)
+datTest$subcat_return_rate[is.na(datTest$subcat_return_rate)] <- global_mean
+
+# Remove original subcategory column
+datTrain$product_subcategory <- NULL
+datTest$product_subcategory  <- NULL
 
 # Dummy variables --------------------------------------
 
@@ -157,7 +190,6 @@ datTrain <- dummy_cols(datTrain,
                        select_columns = c(
                          "marketing_channel",
                          "product_category",
-                         "loyalty_tier",
                          "payment_method",
                          "customer_age_bin",
                          "account_age_bin",
@@ -170,7 +202,6 @@ datTest <- dummy_cols(datTest,
                       select_columns = c(
                         "marketing_channel",
                         "product_category",
-                        "loyalty_tier",
                         "payment_method",
                         "customer_age_bin",
                         "account_age_bin",
@@ -180,9 +211,9 @@ datTest <- dummy_cols(datTest,
                       remove_selected_columns = TRUE) # Remove original columns after creating dummies
 
 #Checking if those with no Loyalty tier are the guest checkout people. They are so I am removing the former  
-table(datTrain$loyalty_tier_None, datTrain$guest_checkout) # hey are so I am removing the former  
-datTrain$loyalty_tier_None <- NULL
-datTest$loyalty_tier_None <- NULL
+#table(datTrain$loyalty_tier_None, datTrain$guest_checkout) # hey are so I am removing the former  
+#datTrain$loyalty_tier_None <- NULL
+#datTest$loyalty_tier_None <- NULL
 
 # Checking if account_age_bin_NA/customer_age_bin_NA are identical to guest_checkout. If so, removing the former. 
 table(datTrain$account_age_bin_NA, datTrain$guest_checkout)
@@ -226,7 +257,7 @@ names(datTrain_smote)
 table(datTrain_smote$class) # The returned outcome variable was renamed as "class" 
 
 #Rename target column 
-which(names(datTrain_smote) == "class") # column 32, the last column, is the class column 
+which(names(datTrain_smote) == "class") 
 names(datTrain_smote)[ncol(datTrain_smote)] <- "returned"
 
 # Checking the new class balance after SMOTE
@@ -241,6 +272,14 @@ names(datTest) <- make.names(names(datTest))
 names(datTrain) <- make.names(names(datTrain))
 
 datTrain_smote$returned <- as.factor(datTrain_smote$returned)
+
+
+
+# Standardizing column names ----------------------------------------------
+
+names(datTrain) <- make.names(names(datTrain))
+
+names(datTest) <- make.names(names(datTest))
 
 # Logistic Regression Baseline model  -------------------------------------
 
@@ -360,12 +399,12 @@ min.cv <- which.min(tr1$cptable[, 4])
 tr1$cptable[min.cv, 4]
 
 # 1-SE rule 
-sel <- which(tr1$cptable[, 4] < tr1$cptable[min.cv, 4] + tr1$cptable[min.cv, 5])[12]
+sel <- which(tr1$cptable[, 4] < tr1$cptable[min.cv, 4] + tr1$cptable[min.cv, 5])
 cps <- tr1$cptable[sel, 1]
 
 # Pruned trees
-tr_min <- prune(tr1, cp = tr1$cptable[min.cv, 1])
-tr_1se <- prune(tr1, cp = cps)
+tr_min <- rpart::prune(tr1, cp = tr1$cptable[min.cv, 1])
+tr_1se <- rpart::prune(tr1, cp = max(cps))
 
 # Predictions
 probs_tr_min <- predict(tr_min, newdata = datTest, type = "prob")
@@ -451,7 +490,7 @@ table(pred_rf_sm_class, datTest$returned)
 
 # XGBoost Model -----------------------------------------------------------
 
-# Making Return Varible a integer for XGBoost
+# Making Return Variable a integer for XGBoost
 datTrain$returned <- as.integer(datTrain$returned) - 1
 datTest$returned  <- as.integer(datTest$returned) - 1
 
@@ -490,9 +529,9 @@ xgbCV <- xgb.cv(
   params = list(
     objective = "binary:logistic",
     learning_rate = 0.05,
-    min_split_loss = 0,
-    max_depth = 4,
-    min_child_weight = 1,
+    min_split_loss = 8.11,
+    max_depth = 7,
+    min_child_weight = 10,
     eval_metric = "auc",
     nthread = 4
   ),
@@ -529,12 +568,12 @@ results <- rbind(results, data.frame(
 ))
 results 
 
+# Variable importance from xgb-final
+importance_matrix <- xgb.importance(model = xgb_final)
+xgb.plot.importance(importance_matrix, top_n = 20)
+print(importance_matrix)
 
-# Automated XGBoost Tuning  -----------------------------------------------
-install.packages("tidymodels")
-library(tidymodels)
-install.packages("finetune")
-library(finetune)
+ # Automated XGBoost Tuning  -----------------------------------------------
 
 # Prepare data
 xgb_data <- as.data.frame(x_matrix)
@@ -567,7 +606,7 @@ xgb_grid <- grid_random(
   loss_reduction(range = c(0, 10)),
   min_n(range = c(1, 20)),
   sample_size = sample_prop(range = c(0.5, 1.0)),
-  mtry(range = c(5, 30)),
+  mtry(range = c(5, ncol(x_matrix))),
   size = 100  # 100 random combinations
 )
 
@@ -576,11 +615,10 @@ xgb_workflow <- workflow() %>%
   add_model(xgb_spec) %>%
   add_formula(returned ~ .)
 
-# Tune
+# Tune - run all together 
 library(doParallel)
 cl <- makePSOCKcluster(detectCores() - 1)
 registerDoParallel(cl)
-
 start <- Sys.time()
 set.seed(42)
 xgb_tuned <- tune_grid(
@@ -599,13 +637,13 @@ select_best(xgb_tuned, metric = "roc_auc")
 
 # Final model with best parameters
 xgb_final_spec <- boost_tree(
-  trees = 978,
-  tree_depth = 7,
-  learn_rate = 0.0133,
-  loss_reduction = 8.11,
+  trees = 616,
+  tree_depth = 6,
+  learn_rate = 0.00947,
+  loss_reduction = 9.51,
   min_n = 10,
-  sample_size = 0.857,
-  mtry = 27
+  sample_size = 0.782,
+  mtry = 22
 ) %>%
   set_engine("xgboost") %>%
   set_mode("classification")
@@ -641,3 +679,112 @@ results <- rbind(results, data.frame(
   Test_AUC = as.numeric(auc_xgb_tuned)
 ))
 results
+
+
+# Test Kaggle Data Setup -----------------------------------------------------
+
+# Loading Testing data
+test <- read.csv("returns_test.csv", stringsAsFactors = TRUE)
+
+# Save ids before droppping 
+test_ids <- test$transaction_id
+
+# Cleaning and adding features 
+test_kaggle <- data_cleaning(test)
+test_kaggle <- data_features(test_kaggle)
+
+# Target Encoding - join subcat means from trainig
+test_kaggle <- left_join(test_kaggle, subcat_means, by = "product_subcategory")
+test_kaggle$subcat_return_rate[is.na(test_kaggle$subcat_return_rate)] <- global_mean
+test_kaggle$product_subcategory <- NULL
+
+# Dummies 
+test_kaggle <- dummy_cols(test_kaggle, 
+                          select_columns = c(
+                            "marketing_channel",
+                            "product_category",
+                            "payment_method",
+                            "customer_age_bin",
+                            "account_age_bin",
+                            "zip_region"
+                          ),
+                          remove_first_dummy = TRUE, 
+                          remove_selected_columns = TRUE)
+
+# Remove same columns as training
+test_kaggle$account_age_bin_NA <- NULL
+test_kaggle$customer_age_bin_NA <- NULL
+
+# Fix NAs in bin columns 
+bin_cols_kaggle <- grep("_bin_", names(test_kaggle), value = TRUE)
+test_kaggle[, bin_cols_kaggle][is.na(test_kaggle[, bin_cols_kaggle])] <- 0
+
+sum(is.na(test_kaggle))
+
+# Fix column names 
+names(test_kaggle) <- make.names(names(test_kaggle))
+
+
+# Prepare matrix - no returned column in test set
+x_matrix_kaggle <- as.matrix(test_kaggle)
+colnames(x_matrix_kaggle) <- make.names(colnames(x_matrix_kaggle))
+
+# Make sure column match training
+check_columns <- function(train_matrix, test_matrix) {
+  train_cols <- colnames(train_matrix)
+  test_cols  <- colnames(test_matrix)
+  
+  missing_from_test  <- setdiff(train_cols, test_cols)
+  extra_in_test      <- setdiff(test_cols, train_cols)
+  order_matches      <- all(train_cols == test_cols)
+  
+  cat("Columns in train but missing from test:", 
+      ifelse(length(missing_from_test) == 0, "None ✓", paste(missing_from_test, collapse = ", ")), "\n")
+  cat("Extra columns in test not in train:", 
+      ifelse(length(extra_in_test) == 0, "None ✓", paste(extra_in_test, collapse = ", ")), "\n")
+  cat("Column order matches:", ifelse(order_matches, "Yes ✓", "No ✗"), "\n")
+}
+
+check_columns(x_matrix, x_matrix_kaggle)
+
+# Check the issue
+check_columns(x_matrix, x_matrix_kaggle)
+
+# Fix - align test to train columns
+# Add any missing columns as 0, drop any extra columns
+missing_cols <- setdiff(colnames(x_matrix), colnames(x_matrix_kaggle))
+extra_cols   <- setdiff(colnames(x_matrix_kaggle), colnames(x_matrix))
+
+# Add missing columns filled with 0
+for (col in missing_cols) {
+  x_matrix_kaggle <- cbind(x_matrix_kaggle, setNames(data.frame(rep(0, nrow(x_matrix_kaggle))), col))
+}
+
+# Drop extra columns
+x_matrix_kaggle <- x_matrix_kaggle[, !colnames(x_matrix_kaggle) %in% extra_cols]
+
+# Reorder to match training
+x_matrix_kaggle <- x_matrix_kaggle[, colnames(x_matrix)]
+
+# Verify
+check_columns(x_matrix, x_matrix_kaggle)
+
+
+# Predict Kaggle Data -----------------------------------------------------
+
+kaggle_probs <- predict(xgb_final, x_matrix_kaggle)
+
+# Check for NAs
+sum(is.na(kaggle_probs))
+
+# Create submission 
+submission <- data.frame(
+  transaction_id = test_ids,
+  returned = kaggle_probs
+)
+
+head(submission)
+nrow(submission)
+
+# Write to CSV
+write.csv(submission, file = "submission.csv", row.names = FALSE)
