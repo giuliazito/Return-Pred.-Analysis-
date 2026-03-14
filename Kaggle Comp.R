@@ -77,6 +77,9 @@ data_cleaning <- function(df) {
   # Make negative ages into NAs
   df$customer_age[df$customer_age < 13] <- NA
   
+  # Make any NAs into 0 
+  df$customer_age[is.na(df$customer_age)] <- 0
+  
   # Clean up payment method 
   df$payment_method <- factor(tolower(as.character(df$payment_method))) 
   df$payment_method <- recode(df$payment_method, "credit card - visa" = "visa")
@@ -90,10 +93,14 @@ data_cleaning <- function(df) {
   # Remove unuseful variables
   df$transaction_id <- NULL
   df$customer_id <- NULL
+  #df$transaction_timestamp <- NULL
+  #df$zip_code <- NULL
+  df$account_age_days <- NULL
   
-  df$loyalty_tier_ordinal<- as.integer(factor(as.character(df$loyalty_tier), 
-                                               levels = c("None", "Bronze", "Silver", "Gold", "Platinum")))
-  df$loyalty_tier <- NULL
+  # Makes loyalty tier an ordinal factor none - 0, bronze - 1 etc 
+  #df$loyalty_tier_ordinal<- as.integer(factor(as.character(df$loyalty_tier), 
+                                               #levels = c("None", "Bronze", "Silver", "Gold", "Platinum")))
+  #df$loyalty_tier <- NULL
   
   return(df)
   
@@ -112,15 +119,16 @@ data_features <- function(df) {
   
   # Make timestamps feature variables
   df$hour_of_day <- hour(df$transaction_timestamp)
-  df$day_of_week <- wday(df$transaction_timestamp)
-  df$month <- month(df$transaction_timestamp)
+  #df$day_of_week <- wday(df$transaction_timestamp)
+  #df$month <- month(df$transaction_timestamp)
   df$is_weekend <- as.integer(wday(df$transaction_timestamp) %in% c(1, 7))
   df$hour_sin <- sin(2 * pi * df$hour_of_day / 24)
   df$hour_cos <- cos(2 * pi * df$hour_of_day / 24)
-  df$day_sin  <- sin(2 * pi * df$day_of_week / 7)
-  df$day_cos  <- cos(2 * pi * df$day_of_week / 7)
+  #df$day_sin  <- sin(2 * pi * df$day_of_week / 7)
+  #df$day_cos  <- cos(2 * pi * df$day_of_week / 7)
   #Remove unfeatured transaction timestamp
   df$transaction_timestamp <- NULL
+  df$hour_of_day <- NULL
   
   # Make zip code features
   df$zip_region <- cut(as.integer(substr(df$zip_code, 1, 1)),
@@ -139,21 +147,29 @@ data_features <- function(df) {
   # Remove unfeatured promo codes
   df$applied_promo_codes <- NULL
   
+  # Add these new features
+  df$price_x_freeship   <- df$price * df$promo_FREESHIP
+  df$price_x_discount   <- df$price * df$discount_pct
+  df$price_x_guest      <- df$price * df$guest_checkout
+  df$high_price         <- as.integer(df$price > quantile(df$price, 0.75, na.rm = TRUE))
+  df$high_discount      <- as.integer(df$discount_pct > quantile(df$discount_pct, 0.75, na.rm = TRUE))
+  df$expensive_discounted <- df$high_price * df$high_discount
+  
   # Bin Customer Age into categories
-  df$customer_age_bin <- cut(df$customer_age,
-                             breaks = c(-Inf, 18, 30, 45, 60, Inf), 
-                             labels = c("Under18", "18to30", "31to45", "46to60", "Over60"),
-                             right = FALSE)
+  #df$customer_age_bin <- cut(df$customer_age,
+                             #breaks = c(-Inf, 18, 30, 45, 60, Inf), 
+                             #labels = c("Under18", "18to30", "31to45", "46to60", "Over60"),
+                             #right = FALSE)
   # Remove unbinned cusomter age
-  df$customer_age <- NULL
+  #df$customer_age <- NULL
   
   # Bin account_age_days into categories
-  df$account_age_bin <- cut(df$account_age_days,
-                            breaks = c(-Inf, 104, 250, 504, Inf),
-                            labels = c("New", "Developing", "Established", "Loyal"),
-                            right = FALSE)
+  #df$account_age_bin <- cut(df$account_age_days,
+                            #breaks = c(-Inf, 104, 250, 504, Inf),
+                            #labels = c("New", "Developing", "Established", "Loyal"),
+                            #right = FALSE)
   # Remove unbinned account_age_days
-  df$account_age_days <- NULL
+  #df$account_age_days <- NULL
   #df$account_age_days[is.na(df$account_age_days)] <- 0
   
   return(df)
@@ -191,8 +207,10 @@ datTrain <- dummy_cols(datTrain,
                          "marketing_channel",
                          "product_category",
                          "payment_method",
-                         "customer_age_bin",
-                         "account_age_bin",
+                         #"product_subcategory",
+                         "loyalty_tier",
+                         #"customer_age_bin",
+                         #"account_age_bin",
                          "zip_region"
                        ),
                        remove_first_dummy = TRUE, # Avoid dummy variable trap
@@ -203,8 +221,10 @@ datTest <- dummy_cols(datTest,
                         "marketing_channel",
                         "product_category",
                         "payment_method",
-                        "customer_age_bin",
-                        "account_age_bin",
+                        #"product_subcategory",
+                        "loyalty_tier",
+                        #"customer_age_bin",
+                        #"account_age_bin",
                         "zip_region"
                       ),
                       remove_first_dummy = TRUE, # Avoid dummy variable trap
@@ -216,24 +236,24 @@ datTest <- dummy_cols(datTest,
 #datTest$loyalty_tier_None <- NULL
 
 # Checking if account_age_bin_NA/customer_age_bin_NA are identical to guest_checkout. If so, removing the former. 
-table(datTrain$account_age_bin_NA, datTrain$guest_checkout)
-table(datTrain$customer_age_bin_NA, datTrain$guest_checkout)
+#table(datTrain$account_age_bin_NA, datTrain$guest_checkout)
+#table(datTrain$customer_age_bin_NA, datTrain$guest_checkout)
 
-datTrain$account_age_bin_NA <- NULL
-datTrain$customer_age_bin_NA <- NULL
+#datTrain$account_age_bin_NA <- NULL
+#datTrain$customer_age_bin_NA <- NULL
 
-datTest$account_age_bin_NA <- NULL
-datTest$customer_age_bin_NA <- NULL
+#datTest$account_age_bin_NA <- NULL
+#datTest$customer_age_bin_NA <- NULL
 
-sum(table(names(datTest) == names(datTrain))) # Checking if the names of the variables are the same in both datasets. They are.es
+#sum(table(names(datTest) == names(datTrain))) # Checking if the names of the variables are the same in both datasets. They are.es
 
 # Making NAs 0s after processing -----------------------------
 
-bin_cols <- grep("_bin_", names(datTrain), value = TRUE)
-datTrain[, bin_cols][is.na(datTrain[, bin_cols])] <- 0
+#bin_cols <- grep("_bin_", names(datTrain), value = TRUE)
+#datTrain[, bin_cols][is.na(datTrain[, bin_cols])] <- 0
 
-bin_cols_test <- grep("_bin_", names(datTest), value = TRUE)
-datTest[, bin_cols_test][is.na(datTest[, bin_cols_test])] <- 0
+#bin_cols_test <- grep("_bin_", names(datTest), value = TRUE)
+#datTest[, bin_cols_test][is.na(datTest[, bin_cols_test])] <- 0
 
 sum(is.na(datTrain))  # should return 0
 sum(is.na(datTest))   # should return 0
@@ -425,7 +445,16 @@ results
 
 # RandomForest  -----------------------------------------------------------
 
+# Convert returned to factor for classification tree
+datTrain$returned <- factor(datTrain$returned, levels = c(0,1), labels = c("No", "Yes"))
+datTest$returned  <- factor(datTest$returned,  levels = c(0,1), labels = c("No", "Yes"))
+
 class(datTrain$returned)
+class(datTest$returned)
+
+# Prepare matrices 
+x_matrix <- as.matrix(datTrain[, !names(datTrain) %in% "returned"])
+x_matrix_test <- as.matrix(datTest[, !names(datTest) %in% "returned"])
 
 # Fixing column names for RF 
 colnames(datTrain) <- make.names(colnames(datTrain))
@@ -447,11 +476,11 @@ roc_rf   <- roc(datTest$returned, probs_rf[, 2], plot = TRUE, grid = TRUE)
 auc_rf   <- auc(roc_rf)
 
 # Update results - fix column name Model not Models
-results <- rbind(results, data.frame(
+results <- data.frame(
   Model = "Random Forest",
   Train_AUC = NA,
   Test_AUC = as.numeric(auc_rf)
-))
+)
 results
 
 
@@ -493,6 +522,8 @@ table(pred_rf_sm_class, datTest$returned)
 # Making Return Variable a integer for XGBoost
 datTrain$returned <- as.integer(datTrain$returned) - 1
 datTest$returned  <- as.integer(datTest$returned) - 1
+y_target  <- as.numeric(datTrain$returned)
+
 
 
 xgb <- xgboost(x = x_matrix,
@@ -521,6 +552,14 @@ results
 
 # CV XGBoost --------------------------------------------------------------
 
+x_matrix <- as.matrix(datTrain[, !names(datTrain) %in% "returned"])
+colnames(x_matrix) <- make.names(colnames(x_matrix))
+y_target <- as.numeric(as.character(datTrain$returned))
+
+# Verify y_target is 0s and 1s
+table(y_target)  # should show only 0 and 1
+range(y_target)  # should be 0 and 1
+
 # Create DMatrix first
 dtrain <- xgb.DMatrix(data = x_matrix, label = y_target)
 
@@ -528,21 +567,23 @@ dtrain <- xgb.DMatrix(data = x_matrix, label = y_target)
 xgbCV <- xgb.cv(
   params = list(
     objective = "binary:logistic",
-    learning_rate = 0.05,
-    min_split_loss = 8.11,
-    max_depth = 7,
-    min_child_weight = 10,
+    learning_rate = 0.00726,   # same
+    min_split_loss = 14.1,     # changed from 12 → 14.1 (loss_reduction)
+    max_depth = 3,             # same
+    min_child_weight = 14,     # changed from 10 → 14 (min_n)
+    subsample = 0.919,         # changed from 0.849 → 0.919 (sample_size)
+    colsample_bytree = 21/ncol(x_matrix),  # add this (mtry=21)
     eval_metric = "auc",
     nthread = 4
   ),
   data = dtrain,
-  nrounds = 500,
+  nrounds = 1000,             # keep high since learning rate is slow (0.00726)
   nfold = 10,
   prediction = TRUE,
   showsd = TRUE,
   stratified = TRUE,
   print_every_n = 10,
-  early_stopping_rounds = 10
+  early_stopping_rounds = 20
 )
 # Getting the best number of rounds based on CV results
 best_nrounds <- which.max(xgbCV$evaluation_log$test_auc_mean)
@@ -551,10 +592,11 @@ best_nrounds
 xgb_final <- xgboost(x = x_matrix,
                      y = factor(y_target),
                      objective = "binary:logistic",
-                     learning_rate = 0.05,
-                     min_split_loss = 0,
-                     max_depth = 4,
-                     min_child_weight = 1,
+                     learning_rate = 0.00726,
+                     min_split_loss = 14.1,
+                     subsample = 0.919,
+                     max_depth = 3,
+                     min_child_weight = 14,
                      nrounds = best_nrounds,
                      verbosity = 0)
 # Predictions with final model
@@ -616,7 +658,6 @@ xgb_workflow <- workflow() %>%
   add_formula(returned ~ .)
 
 # Tune - run all together 
-library(doParallel)
 cl <- makePSOCKcluster(detectCores() - 1)
 registerDoParallel(cl)
 start <- Sys.time()
@@ -637,13 +678,13 @@ select_best(xgb_tuned, metric = "roc_auc")
 
 # Final model with best parameters
 xgb_final_spec <- boost_tree(
-  trees = 616,
-  tree_depth = 6,
-  learn_rate = 0.00947,
-  loss_reduction = 9.51,
-  min_n = 10,
-  sample_size = 0.782,
-  mtry = 22
+  trees = 950,
+  tree_depth = 3,
+  learn_rate = 0.00726,
+  loss_reduction = 14.1,
+  min_n = 14,
+  sample_size = 0.919,
+  mtry = 21
 ) %>%
   set_engine("xgboost") %>%
   set_mode("classification")
@@ -704,20 +745,22 @@ test_kaggle <- dummy_cols(test_kaggle,
                             "marketing_channel",
                             "product_category",
                             "payment_method",
-                            "customer_age_bin",
-                            "account_age_bin",
+                            #"product_subcategory",
+                            "loyalty_tier",
+                            #"customer_age_bin",
+                            #"account_age_bin",
                             "zip_region"
                           ),
                           remove_first_dummy = TRUE, 
                           remove_selected_columns = TRUE)
 
 # Remove same columns as training
-test_kaggle$account_age_bin_NA <- NULL
-test_kaggle$customer_age_bin_NA <- NULL
+#test_kaggle$account_age_bin_NA <- NULL
+#test_kaggle$customer_age_bin_NA <- NULL
 
 # Fix NAs in bin columns 
-bin_cols_kaggle <- grep("_bin_", names(test_kaggle), value = TRUE)
-test_kaggle[, bin_cols_kaggle][is.na(test_kaggle[, bin_cols_kaggle])] <- 0
+#bin_cols_kaggle <- grep("_bin_", names(test_kaggle), value = TRUE)
+#test_kaggle[, bin_cols_kaggle][is.na(test_kaggle[, bin_cols_kaggle])] <- 0
 
 sum(is.na(test_kaggle))
 
@@ -772,7 +815,9 @@ check_columns(x_matrix, x_matrix_kaggle)
 
 # Predict Kaggle Data -----------------------------------------------------
 
-kaggle_probs <- predict(xgb_final, x_matrix_kaggle)
+kaggle_probs <- predict(xgb_final_fit, x_matrix_kaggle, type = "prob")
+
+
 
 # Check for NAs
 sum(is.na(kaggle_probs))
@@ -780,11 +825,38 @@ sum(is.na(kaggle_probs))
 # Create submission 
 submission <- data.frame(
   transaction_id = test_ids,
-  returned = kaggle_probs
+  returned = kaggle_probs$.pred_Yes
 )
 
 head(submission)
 nrow(submission)
 
 # Write to CSV
-write.csv(submission, file = "submission.csv", row.names = FALSE)
+write.csv(submission, file = "submission_4.csv", row.names = FALSE)
+
+
+
+# Averaging ------------------------------------------------------
+
+probs_rf_kaggle <- predict(rf, 
+                           newdata = as.data.frame(x_matrix_kaggle),
+                           type = "prob")[,2]
+
+probs_cvXGBoost_kaggle <- predict(xgb_final, 
+                                  newdata = x_matrix_kaggle
+                                  )
+
+probs_xgtuned_kaggle <- predict(xgb_final_fit, x_matrix_kaggle, type = "prob")$.pred_Yes
+
+avg_probs <- (probs_rf_kaggle + probs_cvXGBoost_kaggle + probs_xgtuned_kaggle) / 3
+
+submission <- data.frame(
+  transaction_id = test_ids,
+  returned = probs_cvXGBoost_kaggle
+)
+
+head(submission)
+nrow(submission)
+
+# Write to CSV
+write.csv(submission, file = "submission_6.csv", row.names = FALSE)
