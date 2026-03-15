@@ -1,6 +1,7 @@
-# =========================================================
-# LIBRARIES
-# =========================================================
+
+# Libraries ---------------------------------------------------------------
+
+
 library(tidyverse)
 library(lubridate)
 library(fastDummies)
@@ -17,51 +18,47 @@ library(tidymodels)
 library(finetune)
 library(caret)
 
-# =========================================================
-# LOADING DATA
-# =========================================================
+
+# Loading training data ---------------------------------------------------
+
 dat <- read.csv("returns_train.csv", stringsAsFactors = FALSE)
 
-# Make target numeric 0/1 just in case
-dat$returned <- as.integer(dat$returned)
+# Splitting training data -------------------------------------------------
 
-# =========================================================
-# TRAIN / TEST SPLIT (70/30, stratified on returned)
-# =========================================================
 set.seed(42)
 train_idx <- caret::createDataPartition(dat$returned, p = 0.7, list = FALSE)
 
 datTrain <- dat[train_idx, , drop = FALSE]
 datTest  <- dat[-train_idx, , drop = FALSE]
 
-# =========================================================
-# CLEANING FUNCTION
-# =========================================================
+
+# Data Cleaning -----------------------------------------------------------
+
+
 data_cleaning <- function(df) {
   
-  # --- customer_age ---
-  df$customer_age[df$customer_age < 13] <- NA
-  df$customer_age_missing <- as.integer(is.na(df$customer_age))
-  df$customer_age[is.na(df$customer_age)] <- 0
+  # Customer age
+  df$customer_age[df$customer_age < 13] <- NA # makes age less than 13 all NA
+  df$customer_age_missing <- as.integer(is.na(df$customer_age)) # Makes a new missing variable if age is NA
+  df$customer_age[is.na(df$customer_age)] <- 0 #replacing all nas in customer age to 0 
   
-  # --- account_age_days ---
-  df$account_age_missing <- as.integer(is.na(df$account_age_days))
-  df$account_age_days[is.na(df$account_age_days)] <- 0
+  # Account age
+  df$account_age_missing <- as.integer(is.na(df$account_age_days)) # New variable to flag missing account age
+  df$account_age_days[is.na(df$account_age_days)] <- 0 # Replace NA account age with 0 
   
-  # --- payment_method ---
-  df$payment_method <- tolower(trimws(as.character(df$payment_method)))
-  df$payment_method[df$payment_method == "credit card - visa"] <- "visa"
-  df$payment_method <- factor(df$payment_method)
+  # Payment method
+  df$payment_method <- tolower(trimws(as.character(df$payment_method))) # trimws removes leading and trailing white spaces. tolower makes everything small  
+  df$payment_method[df$payment_method == "credit card - visa"] <- "visa" # makes any "credit card - visa into visa
+  df$payment_method <- factor(df$payment_method) # Makes the variable a factor of 3 levels 
   
-  # --- guest_checkout ---
-  guest_raw <- trimws(tolower(as.character(df$guest_checkout)))
-  df$guest_checkout <- as.integer(guest_raw %in% c("true", "1", "t", "yes", "y"))
+  # Guest checkout
+  df$guest_checkout <- as.integer(as.logical(df$guest_checkout)) # Converts guest checkout to logical (TRUE/FALSE) and then to integer (1/0)
   
-  # --- remove IDs if present ---
-  if ("transaction_id" %in% names(df)) df$transaction_id <- NULL
-  if ("customer_id" %in% names(df)) df$customer_id <- NULL
+  # Remove IDs if present
+  if ("transaction_id" %in% names(df)) df$transaction_id <- NULL # IF the variable exists, it is removed 
+  if ("customer_id" %in% names(df)) df$customer_id <- NULL # IF veriable exists, it is removed 
   
-  # --- loyalty tier -> ordinal ---
+  # Loyalty tier - Makes each title a numerical value none is 0, Bronze is 1 etc. 
   if ("loyalty_tier" %in% names(df)) {
     df$loyalty_tier_ordinal <- as.integer(factor(
       as.character(df$loyalty_tier),
@@ -70,35 +67,39 @@ data_cleaning <- function(df) {
     df$loyalty_tier <- NULL
   }
   
-  # --- target ---
-  df$returned <- as.integer(df$returned)
+  # Target only if present
+  if ("returned" %in% names(df)) {
+    df$returned <- as.integer(df$returned)
+  }
+  
+  # Making Timestamps into date objects 
+  if ("transaction_timastamp" %in% names(df)) {
+    df$transaction_timestamp <- lubridate:: ymd_hms(as.character(df$transaction_timestamp), quiet = TRUE)
+  }
   
   return(df)
 }
 
-# =========================================================
-# FEATURE ENGINEERING FUNCTION
-# =========================================================
+# Feature Engineering -----------------------------------------------------
+
 data_features <- function(df) {
   
   # --- timestamp ---
-  df$transaction_timestamp <- lubridate::ymd_hms(as.character(df$transaction_timestamp), quiet = TRUE)
+  df$hour_of_day <- lubridate::hour(df$transaction_timestamp) # Extracting hour od day 
+  df$day_of_week <- lubridate::wday(df$transaction_timestamp) # Extracting day of week
+  df$month <- lubridate::month(df$transaction_timestamp) # Extracting month
+  df$is_weekend <- as.integer(df$day_of_week %in% c(1, 7)) # Extracting whether it's the weekend, 1 is Sun and 7 is Sat 
   
-  df$hour_of_day <- lubridate::hour(df$transaction_timestamp)
-  df$day_of_week <- lubridate::wday(df$transaction_timestamp)
-  df$month <- lubridate::month(df$transaction_timestamp)
-  df$is_weekend <- as.integer(df$day_of_week %in% c(1, 7))
-  
-  # cyclical encoding
-  df$hour_sin <- sin(2 * pi * df$hour_of_day / 24)
+  # cyclical encoding - makes the hour of the day and the day of the week linear 
+  df$hour_sin <- sin(2 * pi * df$hour_of_day / 24) 
   df$hour_cos <- cos(2 * pi * df$hour_of_day / 24)
   df$day_sin  <- sin(2 * pi * df$day_of_week / 7)
   df$day_cos  <- cos(2 * pi * df$day_of_week / 7)
   
   # holiday-ish season flag
-  df$is_holiday_season <- as.integer(df$month %in% c(11, 12))
+  df$is_holiday_season <- as.integer(df$month %in% c(11, 12)) # Extracts whether purchase date is a holiday 
   
-  df$transaction_timestamp <- NULL
+  df$transaction_timestamp <- NULL 
   
   # --- zip feature ---
   zip_first_digit <- suppressWarnings(as.integer(substr(sprintf("%05s", df$zip_code), 1, 1)))
@@ -109,13 +110,14 @@ data_features <- function(df) {
     right = TRUE
   )
   df$zip_code <- NULL
+  df$zip_first_digit <- NULL
   
   # --- promo features ---
-  promo_text <- as.character(df$applied_promo_codes)
-  df$promo_FREESHIP <- as.integer(grepl("FREESHIP", promo_text))
-  df$promo_NEWUSER  <- as.integer(grepl("NEWUSER", promo_text))
-  df$promo_SAVE20   <- as.integer(grepl("SAVE20", promo_text))
-  df$promo_WINTER50 <- as.integer(grepl("WINTER50", promo_text))
+  df$applied_promo_codes <- as.character(df$applied_promo_codes)
+  df$promo_FREESHIP <- as.integer(grepl("FREESHIP", applied_promo_codes))
+  df$promo_NEWUSER  <- as.integer(grepl("NEWUSER", applied_promo_codes))
+  df$promo_SAVE20   <- as.integer(grepl("SAVE20", applied_promo_codes))
+  df$promo_WINTER50 <- as.integer(grepl("WINTER50", applied_promo_codes))
   df$num_promos <- df$promo_FREESHIP + df$promo_NEWUSER + df$promo_SAVE20 + df$promo_WINTER50
   df$applied_promo_codes <- NULL
   
@@ -135,18 +137,18 @@ data_features <- function(df) {
   )
   
   # --- numeric transforms ---
-  df$log_price <- log1p(df$price)
-  df$log_account_age <- log1p(df$account_age_days)
-  df$discount_value <- df$price * df$discount_pct
-  df$final_price <- df$price * (1 - df$discount_pct)
-  df$discount_strength <- df$discount_value / (df$final_price + 1)
+  df$log_price <- log1p(df$price) # reduce skewness of price distr to help linear models by making it more normal
+  df$log_account_age <- log1p(df$account_age_days) # Capture the diminishing effect of account age on the target variable. It assumes that the impact of account age on the outcome decreases as the account gets older.
+  df$discount_value <- df$price * df$discount_pct # Applies discount to price to get actual discount amount 
+  df$final_price <- df$price * (1 - df$discount_pct) # Calculates the final price after discount 
+  df$discount_strength <- df$discount_value / (df$final_price + 1) # measures how strong the discount is 
   
   # --- interactions ---
-  df$guest_discount <- df$guest_checkout * df$discount_pct
-  df$price_loyalty <- df$price * df$loyalty_tier_ordinal
-  df$price_x_freeship <- df$price * df$promo_FREESHIP
-  df$discount_x_newuser <- df$discount_pct * df$promo_NEWUSER
-  df$guest_x_newuser <- df$guest_checkout * df$promo_NEWUSER
+  df$guest_discount <- df$guest_checkout * df$discount_pct # captures whether guest checkout users are more likely to be influenced by discounts
+  df$price_loyalty <- df$price * df$loyalty_tier_ordinal # captures whether higher loyalty tiers are associated with higher priced purchases
+  df$price_x_freeship <- df$price * df$promo_FREESHIP # captures whether the effect of price on returns is different for those who got free shipping
+  df$discount_x_newuser <- df$discount_pct * df$promo_NEWUSER # captures whether the effect of discount on returns is different for new users
+  df$guest_x_newuser <- df$guest_checkout * df$promo_NEWUSER # captures whether the effect of being a guest checkout on returns is different for new users
   
   # convert key character cols to factor before dummying
   factor_cols <- intersect(
@@ -162,22 +164,29 @@ data_features <- function(df) {
 # =========================================================
 # TRAIN-ONLY FEATURE MAPS (NO TARGET LEAKAGE)
 # =========================================================
+
+## Maps are transformations created from the training datasets that are then applied to the train and test data
+## the maps capture certain statistics, patterns, or relationship that can be used to create new features without having leakage
+## leakage is when info from the target varaible is somehow used in making the features used to train the model
+## leakage makes the performance over optimistic and can lead to models that don't generalize well to new data
+
 fit_feature_maps <- function(train_df) {
   
-  # quantile cutoffs from TRAIN only
+  # quantile cutoffs from TRAIN only - flags a transaction as high price or high discount depending if its above the 75 quantile 
   price_q75 <- as.numeric(stats::quantile(train_df$price, 0.75, na.rm = TRUE))
   discount_q75 <- as.numeric(stats::quantile(train_df$discount_pct, 0.75, na.rm = TRUE))
   
-  # category mean price from TRAIN only
+  # category mean price from TRAIN only - captures average price per categroy 
   category_price_map <- train_df %>%
     group_by(product_category) %>%
     summarise(category_avg_price = mean(price, na.rm = TRUE), .groups = "drop")
   
-  # subcategory mean price from TRAIN only
+  # subcategory mean price from TRAIN only - captures average price per subcategory 
   subcategory_price_map <- train_df %>%
     group_by(product_subcategory) %>%
     summarise(subcategory_avg_price = mean(price, na.rm = TRUE), .groups = "drop")
   
+  # maps are organized as lists. 
   list(
     price_q75 = price_q75,
     discount_q75 = discount_q75,
@@ -185,6 +194,8 @@ fit_feature_maps <- function(train_df) {
     subcategory_price_map = subcategory_price_map
   )
 }
+
+# Now the maps are applied to make new features where no target leakes 
 
 apply_feature_maps <- function(df, maps) {
   
@@ -268,9 +279,10 @@ make_dummies_aligned <- function(train_df, test_df) {
   return(list(train = train_df, test = test_df))
 }
 
-# =========================================================
-# PREPROCESS TRAIN AND TEST
-# =========================================================
+
+# Process Training and Test Data ------------------------------------------
+
+
 datTrain <- data_cleaning(datTrain)
 datTest  <- data_cleaning(datTest)
 
@@ -310,13 +322,12 @@ cat("Train rows:", nrow(datTrain_processed), "\n")
 cat("Test rows :", nrow(datTest_processed), "\n")
 cat("Same columns in train/test:", identical(names(datTrain_processed), names(datTest_processed)), "\n\n")
 
-# =========================================================
-# OPTIONAL SMOTE ON TRAIN ONLY
-# Applied only if minority class proportion < 25%
-# =========================================================
+=
 y_train_original <- datTrain_processed$returned
 class_props <- prop.table(table(y_train_original))
 minority_prop <- min(class_props)
+
+# SMOTE on Training Data --------------------------------------------------
 
 cat("Training class proportions:\n")
 print(class_props)
@@ -550,10 +561,7 @@ legend(
 )
 
 
-# =========================================================
-# KAGGLE TEST PROCESSING + SUBMISSION FILE
-# =========================================================
-
+# Kaggle Testing Data Processing ------------------------------------------
 
 # Load unseen Kaggle test data
 test <- read.csv("returns_test.csv", stringsAsFactors = FALSE)

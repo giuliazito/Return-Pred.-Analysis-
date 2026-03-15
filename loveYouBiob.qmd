@@ -1,0 +1,234 @@
+---
+title: "GC code"
+format: html
+editor: visual
+---
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(xgboost)
+library(caret)
+library(pROC)
+```
+
+# Load data
+
+```{r}
+train <- read_csv("returns_train.csv")
+```
+
+# Data wrangling
+
+```{r}
+# drop transaction_id, since it is unique
+train <- train %>% select(-transaction_id)
+
+# split transaction_timestamp into year, month, day, time
+train <- train %>% 
+  mutate(year = as.integer(format(transaction_timestamp, "%Y")),
+         month = as.integer(format(transaction_timestamp, "%m")),
+         day = as.integer(format(transaction_timestamp, "%d")),
+         time = as.integer(format(transaction_timestamp, "%H%M%S"))) %>%
+  select(-transaction_timestamp)
+
+# make promo_order numeric
+train <- train %>%
+  mutate(promo_order_length = str_length(applied_promo_codes)) %>% 
+  select(-applied_promo_codes)
+
+# make ages positive
+train <- train %>% 
+  mutate(customer_age = abs(customer_age))
+
+# make payment_method all lowercase, grab visa, mastercard or paypal
+train <- train %>%
+  mutate(payment_method = tolower(payment_method)) %>%
+  mutate(payment_method = case_when(
+    str_detect(payment_method, "visa") ~ "visa",
+    str_detect(payment_method, "mastercard") ~ "mastercard",
+    str_detect(payment_method, "paypal") ~ "paypal",
+    TRUE ~ payment_method
+  ))
+  
+```
+
+## Convert categorical variables to factors
+
+```{r}
+train <- train %>%
+  mutate(
+    marketing_channel = as.factor(marketing_channel),
+    product_category = as.factor(product_category),
+    product_subcategory = as.factor(product_subcategory),
+    loyalty_tier = factor(loyalty_tier,
+                             levels = c("None", "Bronze",
+                                        "Silver", "Gold", 
+                                            "Platinum")),
+         payment_method = as.factor(payment_method),
+    promo_order_length = factor(promo_order_length,
+                                levels=sort(unique(promo_order_length))),
+
+         )
+
+str(train)
+```
+
+# Train XGBoost model
+
+## Split data into train and test sets
+
+```{r}
+# relocate returned column to last
+train <- train %>% relocate(returned, .after = last_col())
+# split data 80:20
+set.seed(42)
+
+parts <- createDataPartition(train$returned, p = 0.7, list = FALSE)
+
+train_df <- train[parts, ]
+test_df <- train[-parts, ]
+
+dim(train_df)
+dim(test_df)
+```
+
+## Load into xgboost DMatrix format
+
+```{r}
+#define predictor and response variables in training set
+train_x = data.matrix(train_df[, -18])
+train_y = train_df[[18]]
+
+#define predictor and response variables in testing set
+test_x = data.matrix(test_df[, -18])
+test_y = test_df[[18]]
+
+#define final training and testing sets
+xgb_train = xgb.DMatrix(data = train_x, label = train_y)
+xgb_test = xgb.DMatrix(data = test_x, label = test_y)
+```
+
+```{r}
+#define watchlist
+watchlist = list(train=xgb_train, test=xgb_test)
+
+#fit XGBoost model and display training and testing data at each round
+model = xgb.train(data = xgb_train,
+                  learning_rate =.4,
+                  max.depth = 3, 
+                  watchlist=watchlist, 
+                  nrounds = 300,
+                  objective = "binary:logistic",
+                  eval_metric = "auc")
+```
+
+```{r}
+eval_log = attributes(model)$evaluation_log
+best_round = which.max(eval_log$test_auc)
+print(paste("Best round:", best_round, 
+            "with AUC:", eval_log$test_auc[best_round]))
+```
+
+##Validate findings
+
+```{r}
+predsTest = predict(model, 
+                newdata = xgb_test,
+                iterationrange = c(1, best_round + 1))
+
+#predsTest <- ifelse(predsTest > 0.5, 1, 0)
+
+roc_calc = roc(response = test_y, predictor = predsTest, quiet = TRUE)
+print(auc(roc_calc))
+```
+
+# Load test data
+
+```{r}
+ToSubmit <- read_csv("returns_test.csv")
+```
+
+# Data wrangling
+
+```{r}
+ToSubmit_transID <- ToSubmit$transaction_id
+
+# drop transaction_id, since it is unique
+ToSubmit <- ToSubmit %>% select(-transaction_id)
+
+# split transaction_timestamp into year, month, day, time
+ToSubmit <- ToSubmit %>% 
+  mutate(year = as.integer(format(transaction_timestamp, "%Y")),
+         month = as.integer(format(transaction_timestamp, "%m")),
+         day = as.integer(format(transaction_timestamp, "%d")),
+         time = as.integer(format(transaction_timestamp, "%H%M%S"))) %>%
+  select(-transaction_timestamp)
+
+# make promo_order numeric
+ToSubmit <- ToSubmit %>%
+  mutate(promo_order_length = str_length(applied_promo_codes)) %>% 
+  select(-applied_promo_codes)
+
+# make ages positive
+ToSubmit <- ToSubmit %>% 
+  mutate(customer_age = abs(customer_age))
+
+# make payment_method all lowercase, grab visa, mastercard or paypal
+ToSubmit <- ToSubmit %>%
+  mutate(payment_method = tolower(payment_method)) %>%
+  mutate(payment_method = case_when(
+    str_detect(payment_method, "visa") ~ "visa",
+    str_detect(payment_method, "mastercard") ~ "mastercard",
+    str_detect(payment_method, "paypal") ~ "paypal",
+    TRUE ~ payment_method
+  ))
+  
+```
+
+## Convert categorical variables to factors
+
+```{r}
+ToSubmit <- ToSubmit %>%
+  mutate(
+    marketing_channel = as.factor(marketing_channel),
+    product_category = as.factor(product_category),
+    product_subcategory = as.factor(product_subcategory),
+    loyalty_tier = factor(loyalty_tier,
+                             levels = c("None", "Bronze",
+                                        "Silver", "Gold", 
+                                            "Platinum")),
+         payment_method = as.factor(payment_method),
+    promo_order_length = factor(promo_order_length,
+                                levels=sort(unique(promo_order_length))),
+
+         )
+
+str(ToSubmit)
+```
+
+## Load into xgboost DMatrix format
+
+```{r}
+#define predictor and response variables in ToSubmiting set
+ToSubmit_x = data.matrix(ToSubmit)
+
+#define xgb ToSubmiting set
+xgb_ToSubmit2 = xgb.DMatrix(data = ToSubmit_x)
+```
+
+```{r}
+preds = predict(model, 
+                newdata = xgb_ToSubmit2,
+                iterationrange = c(1, best_round + 1))
+```
+
+# Create submission file
+
+```{r}
+submission <- data.frame(transaction_id = ToSubmit_transID, 
+                         returned = preds)
+
+write.csv(submission, "submission_16.csv", row.names = FALSE)
+```
