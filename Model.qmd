@@ -215,20 +215,20 @@ watchlist = list(train = xgb_train, test = xgb_test)
 # Fit model
 xgb_model = xgb.train(
   params = list(
-    learning_rate = 0.05, 
-    max_depth = 6, 
+    learning_rate = 0.02, 
+    max_depth = 5, 
     objective = "binary:logistic",
     eval_metric = "auc",
-    subsample = 0.5,
-    min_child_weight = 25,
-    colsample_bytree = 0.3,
+    subsample = 0.4,
+    min_child_weight = 22,
+    colsample_bytree = 0.2,
     gamma = 2
   ),
   data = xgb_train, 
   evals = watchlist, 
-  nrounds= 2000,
-  early_stopping_rounds = 200,
-  print_every_n = 25
+  nrounds= 3000,
+  early_stopping_rounds = 300,
+  print_every_n = 100
 )
 
 eval_log <- attributes(xgb_model)$evaluation_log
@@ -241,11 +241,80 @@ print(paste("Best round:", best_round,
 ### Predict
 
 ```{r}
-# Predict
 pred_xgb <-predict(xgb_model, newdata = xgb_test, iterationrange = c(1, best_round +1))
 
 roc_xgb <- roc(test_y, pred_xgb, quiet = TRUE)
 print(auc(roc_xgb))
+```
+
+### CV XGBoost 
+
+```{r}
+# 1. Run the CV to find the 'True' AUC and the best number of rounds
+cv_model <- xgb.cv(
+  params = list(
+    learning_rate = 0.02, 
+    max_depth = 5,
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    subsample = 0.5,
+    colsample_bytree = 0.3,
+    min_child_weight = 30,
+    gamma = 2
+  ),
+  data = xgb_train,        # Use your 66/33 undersampled DMatrix here
+  nfold = 5,               # 5 folds is standard for Kaggle
+  nrounds = 2000,          
+  early_stopping_rounds = 100,
+  print_every_n = 50,
+  stratified = TRUE,       # CRITICAL: Keeps the 66/33 balance in every fold
+  verbose = 1
+)
+
+# 2. Extract the log (it's a data.table)
+cv_log <- cv_model$evaluation_log
+
+# 3. Find the row index where the average test AUC was highest
+best_round <- which.max(cv_log$test_auc_mean)
+
+# 4. Double check it
+print(paste("The best round is:", best_round))
+
+# 3. Look at your 'True' Expected Score
+# This 'test_auc_mean' is usually much closer to the Kaggle Leaderboard
+final_cv_auc <- max(cv_model$evaluation_log$test_auc_mean)
+print(paste("Expected Kaggle AUC:", round(final_cv_auc, 4)))
+```
+
+### Make final CV model with Best Rounds 
+
+```{r}
+
+final_xgb_model <- xgb.train(
+  params = list(
+    learning_rate = 0.02, 
+    max_depth = 5,
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    subsample = 0.5,
+    colsample_bytree = 0.3,
+    min_child_weight = 30,
+    gamma = 2
+  ),
+  data = xgb_train, # Your full DMatrix
+  nrounds = best_round
+)
+
+```
+
+### Predict CV XGboost 
+
+```{r}
+# Predict
+pred_xgb_cv <-predict(final_xgb_model, newdata = xgb_test)
+
+roc_xgb_cv <- roc(test_y, pred_xgb_cv, quiet = TRUE)
+print(auc(roc_xgb_cv))
 ```
 
 ## Testing Data
@@ -275,9 +344,9 @@ xgb_kaggle_test <- xgb.DMatrix(data = kaggle_x)
 ### Predict on Test Data
 
 ```{r}
-kaggle_preds <- predict(xgb_model, 
-                        newdata = xgb_kaggle_test, 
-                        iterationrange = c(1, best_round + 1))
+kaggle_preds <- predict(final_xgb_model, 
+                        newdata = xgb_kaggle_test)
+                        #iterationrange = c(1, best_round + 1))
 ```
 
 ### Make Submission File
@@ -286,7 +355,7 @@ kaggle_preds <- predict(xgb_model,
 submission <- data.frame(transaction_id = test_id, 
                          returned = kaggle_preds)
 
-write.csv(submission, "submission_32.csv", row.names = FALSE)
+write.csv(submission, "submission_35.csv", row.names = FALSE)
 ```
 
 ## XGBoost Autotuning
