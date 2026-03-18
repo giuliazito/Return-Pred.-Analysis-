@@ -31,15 +31,15 @@ library(fastDummies)
 dat <- read_csv("returns_train.csv")
 ```
 
-## Data Understanding - Viz 
+## Data Understanding - Viz
 
-### Viz Miss - Visualizing missing data 
+### Viz Miss - Visualizing missing data
 
 ```{r}
 
 ```
 
-### Balance column chart 
+### Balance column chart
 
 ```{r}
 
@@ -51,13 +51,13 @@ dat <- read_csv("returns_train.csv")
 
 ```
 
-### Violin plot - shows outliers and distribution 
+### Violin plot - shows outliers and distribution
 
 ```{r}
 
 ```
 
-### Scatterplot Matrix 
+### Scatterplot Matrix
 
 ```{r}
 
@@ -144,7 +144,7 @@ make_factors <- function(df) {
 dat <- make_factors(dat)
 ```
 
-## Removing low importance variables 
+## Removing low importance variables
 
 ```{r}
 
@@ -220,13 +220,13 @@ xgb_model = xgb.train(
     objective = "binary:logistic",
     eval_metric = "auc",
     subsample = 0.523,
-    min_child_weight = 23,
-    colsample_bytree = 0.3,
-    gamma = 3
+    min_child_weight = 35,
+    colsample_bytree = 0.2,
+    gamma = 2
   ),
   data = xgb_train, 
   evals = watchlist, 
-  nrounds= 2000,
+  nrounds= 1500,
   early_stopping_rounds = 200,
   print_every_n = 25
 )
