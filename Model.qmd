@@ -1,0 +1,425 @@
+---
+title: "Model"
+format: html
+---
+
+# Predictive Model
+
+### Libraries
+
+```{r}
+library(tidyverse)
+library(plotrix)
+library(corrplot)
+library(pROC)
+library(doParallel)
+library(rpart)
+library(smotefamily)
+library(xgboost)
+library(tidymodels)
+library(finetune)
+library(caret)
+library(themis)
+library(fastDummies)
+
+```
+
+## Loading Data
+
+```{r}
+
+dat <- read_csv("returns_train.csv")
+```
+
+## Data Understanding - Viz 
+
+### Viz Miss - Visualizing missing data 
+
+```{r}
+
+```
+
+### Balance column chart 
+
+```{r}
+
+```
+
+### Correlation Plot
+
+```{r}
+
+```
+
+### Violin plot - shows outliers and distribution 
+
+```{r}
+
+```
+
+### Scatterplot Matrix 
+
+```{r}
+
+```
+
+## Cleaning Data
+
+```{r}
+
+data_cleaning <- function(df) {
+  
+  # Remove unique identifier 
+  df$transaction_id <- NULL
+  
+  # Make transaction_timestmap a date format
+  if("transaction_timestamp" %in% names(df)) {
+    df$transaction_timestamp <- lubridate::ymd_hms(df$transaction_timestamp)
+  }
+  
+  # Make customer_age absolute factors
+  if("customer_age" %in% names(df)) {
+    df$customer_age <- abs(df$customer_age)
+  }
+  
+  # Fix payment method 
+  if("payment_method" %in% names(df)) {
+    df$payment_method <- tolower(trimws(df$payment_method))
+    df$payment_method <- recode(df$payment_method,"credit card - visa" = "visa")
+  }
+  
+  return(df)
+}
+
+dat <- data_cleaning(dat)
+```
+
+## Feature Variables
+
+```{r}
+
+feature_variables <- function(df) {
+  
+  # Extract promo code length to see which transactions used none, 1 or 2 
+  df$promo_order_length <- str_length(df$applied_promo_codes) 
+  df$applied_promo_codes <- NULL
+  
+  
+  # Extract time, day, month, year of timestamps 
+  df$time <- as.integer(format(df$transaction_timestamp, "%H%M%S"))
+  df$day <- as.integer(format(df$transaction_timestamp, "%d"))
+  df$month <- as.integer(format(df$transaction_timestamp, "%m"))
+  df$year <- as.integer(format(df$transaction_timestamp, "%Y"))
+  df$transaction_timestamp <- NULL
+  
+  return(df)
+  
+}
+
+dat <- feature_variables(dat)
+```
+
+## Factor Variables
+
+```{r}
+make_factors <- function(df) {
+  
+  # Make variables into factors 
+  df$marketing_channel <- as.factor(df$marketing_channel)
+  df$product_category <- as.factor(df$product_category)
+  df$product_subcategory <- as.factor(df$product_subcategory)
+  df$payment_method <- as.factor(df$payment_method)
+  df$guest_checkout <- as.factor(df$guest_checkout)
+  df$promo_order_length <- factor(df$promo_order_length, 
+                                levels = sort(unique(df$promo_order_length)))
+  df$loyalty_tier <- factor(df$loyalty_tier, 
+                          levels = c("None", "Bronze", "Silver", "Gold", "Platinum"))
+  if("returned" %in% names(df)) {
+     df$returned <- factor(df$returned)
+  }
+  
+  return(df)
+}
+
+dat <- make_factors(dat)
+```
+
+## Removing low importance variables 
+
+```{r}
+
+remove_var <- function(df) {
+  df$guest_checkout <- NULL
+  df$loyalty_tier <- NULL
+  df$marketing_channel <- NULL
+  df$payment_method <- NULL
+
+  return(df)
+}
+
+dat <- remove_var(dat)
+```
+
+## Split the data
+
+```{r}
+set.seed(42)
+
+train <- createDataPartition(dat$returned, p = 0.90, list = FALSE)
+datTrain <- dat[train, ]
+datTest <- dat[-train, ]
+
+dim(datTrain)
+dim(datTest)
+```
+
+## Random Under Sampling
+
+```{r}
+
+prop.table(table(datTrain$returned))
+
+recipe_obj <- recipe(returned~., data = datTrain) %>%
+  step_downsample(returned, under_ratio = 2) %>%
+  prep()
+
+datTrain <- recipe_obj %>%
+  bake(new_data = NULL)
+
+print(prop.table(table(datTrain$returned)))
+```
+
+## XGBoost Modeling
+
+### Define matrices
+
+```{r}
+
+# Define matrices 
+train_x <- data.matrix(datTrain[, -which(names(datTrain) == "returned")])
+train_y <- as.numeric(datTrain$returned) - 1
+
+test_x <- data.matrix(datTest[, -which(names(datTest) == "returned")])
+test_y <- as.numeric(datTest$returned) - 1
+
+xgb_train <- xgb.DMatrix(data = train_x, label = train_y)
+xgb_test <- xgb.DMatrix(data= test_x, label = test_y)
+```
+
+### Fit XGBoost
+
+```{r}
+# Define watchlist
+watchlist = list(train = xgb_train, test = xgb_test)
+
+# Fit model
+xgb_model = xgb.train(
+  params = list(
+    learning_rate = 0.05, 
+    max_depth = 6, 
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    subsample = 0.523,
+    min_child_weight = 23,
+    colsample_bytree = 0.3,
+    gamma = 3
+  ),
+  data = xgb_train, 
+  evals = watchlist, 
+  nrounds= 2000,
+  early_stopping_rounds = 200,
+  print_every_n = 25
+)
+
+eval_log <- attributes(xgb_model)$evaluation_log
+best_round <- which.max(eval_log$test_auc)
+print(paste("Best round:", best_round,
+            "Test AUC:", eval_log$test_auc[best_round]))
+
+```
+
+### Predict
+
+```{r}
+# Predict
+pred_xgb <-predict(xgb_model, newdata = xgb_test, iterationrange = c(1, best_round +1))
+
+roc_xgb <- roc(test_y, pred_xgb, quiet = TRUE)
+print(auc(roc_xgb))
+```
+
+## Testing Data
+
+### Testing data set up
+
+```{r}
+kaggle <- read_csv("returns_test.csv")
+test_id <- kaggle$transaction_id
+
+# Cleaning and processing kaggle data
+
+kaggle <- data_cleaning(kaggle)
+kaggle <- feature_variables(kaggle)
+kaggle <- make_factors(kaggle)
+kaggle <- remove_var(kaggle)
+
+# Define matrices
+
+names(kaggle)
+kaggle_x <- data.matrix(kaggle)
+
+xgb_kaggle_test <- xgb.DMatrix(data = kaggle_x)
+
+```
+
+### Predict on Test Data
+
+```{r}
+kaggle_preds <- predict(xgb_model, 
+                        newdata = xgb_kaggle_test, 
+                        iterationrange = c(1, best_round + 1))
+```
+
+### Make Submission File
+
+```{r}
+submission <- data.frame(transaction_id = test_id, 
+                         returned = kaggle_preds)
+
+write.csv(submission, "submission_32.csv", row.names = FALSE)
+```
+
+## XGBoost Autotuning
+
+### Prepare data for tidymodels
+
+```{r}
+
+# Recode returned to "Yes"/"No" for tidymodels
+# train_balanced$returned is already a factor (0/1 levels from make_factors),
+# so we check which level corresponds to 1
+
+xgb_data <- train_balanced %>%
+  mutate(returned = factor(ifelse(returned == 1, "Yes", "No"),
+                           levels = c("No", "Yes")))
+
+xgb_data_test <- datTest %>%
+  mutate(returned = factor(ifelse(returned == 1, "Yes", "No"),
+                           levels = c("No", "Yes")))
+```
+
+### Model Specification
+
+```{r}
+xgb_spec <- boost_tree(
+  trees          = tune(),
+  tree_depth     = tune(),
+  learn_rate     = tune(),
+  loss_reduction = tune(),
+  min_n          = tune(),
+  sample_size    = tune(),
+  mtry           = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+```
+
+### CV Folds and Search Grid
+
+```{r}
+
+set.seed(42)
+cv_folds <- vfold_cv(xgb_data, v = 5, repeats = 3, strata = returned)
+
+set.seed(42)
+xgb_grid <- grid_random(
+  trees(range          = c(100, 1000)),
+  tree_depth(range     = c(3, 10)),
+  learn_rate(range     = c(-3, -1)),    # log10 scale: 0.001 to 0.1
+  loss_reduction(range = c(0, 10)),
+  min_n(range          = c(1, 20)),
+  sample_prop(range    = c(0.5, 1.0)),
+  mtry(range           = c(5, ncol(xgb_data) - 1)),
+  size = 100
+)
+```
+
+### Workflow
+
+```{r}
+xgb_workflow <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_formula(returned ~ .)
+```
+
+### Run Tuning
+
+```{r}
+#| cache: true
+#| label: tuning
+
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+start <- Sys.time()
+set.seed(42)
+xgb_tuned <- tune_grid(
+  xgb_workflow,
+  resamples = cv_folds,
+  grid      = xgb_grid,
+  metrics   = metric_set(roc_auc),
+  control   = control_grid(verbose = TRUE, allow_par = TRUE)
+)
+stopCluster(cl)
+
+print(Sys.time() - start)
+```
+
+### Tuning Results
+
+```{r}
+# Top 5 parameter combinations
+show_best(xgb_tuned, metric = "roc_auc", n = 5)
+```
+
+```{r}
+# Visualise tuning performance across hyperparameters
+autoplot(xgb_tuned)
+```
+
+### Fit Final Model with Best Paramemete
+
+```{r}
+best_params <- select_best(xgb_tuned, metric = "roc_auc")
+print(best_params)
+
+xgb_final_workflow <- xgb_workflow %>%
+  finalize_workflow(best_params)
+
+xgb_final_fit <- fit(xgb_final_workflow, data = xgb_data)
+```
+
+### Evaluate on test set
+
+```{r}
+xgb_final_probs <- predict(xgb_final_fit,
+                           new_data = xgb_data_test,
+                           type = "prob")
+
+roc_result <- roc(
+  response  = as.numeric(xgb_data_test$returned == "Yes"),
+  predictor = xgb_final_probs$.pred_Yes,
+  quiet     = TRUE
+)
+print(auc(roc_result))
+```
+
+## Importance Variable
+
+```{r}
+importance_matrix <- xgb.importance(model = xgb_model)
+
+xgb.ggplot.importance(importance_matrix) +
+  ggtitle("XGBoost Variable Importance") +
+  theme_minimal() 
+```
