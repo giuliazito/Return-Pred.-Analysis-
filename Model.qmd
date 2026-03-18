@@ -219,14 +219,14 @@ xgb_model = xgb.train(
     max_depth = 6, 
     objective = "binary:logistic",
     eval_metric = "auc",
-    subsample = 0.523,
-    min_child_weight = 35,
-    colsample_bytree = 0.2,
+    subsample = 0.5,
+    min_child_weight = 25,
+    colsample_bytree = 0.3,
     gamma = 2
   ),
   data = xgb_train, 
   evals = watchlist, 
-  nrounds= 1500,
+  nrounds= 2000,
   early_stopping_rounds = 200,
   print_every_n = 25
 )
