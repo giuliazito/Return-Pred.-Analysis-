@@ -136,10 +136,6 @@ corrplot(cor_matrix,
 
 feature_variables <- function(df) {
   
-  # Extract promo code length to see which transactions used none, 1 or 2 
-  #df$promo_order_length <- str_length(df$applied_promo_codes) 
-  #df$applied_promo_codes <- NULL
-  
   if("applied_promo_codes" %in% names(df)) {
     df$promo_winter50 <- as.numeric(str_detect(df$applied_promo_codes, "WINTER50"))
     df$promo_freeship <- as.numeric(str_detect(df$applied_promo_codes, "FREESHIP"))
@@ -181,8 +177,6 @@ make_factors <- function(df) {
   df$product_subcategory <- as.factor(df$product_subcategory)
   df$payment_method <- as.factor(df$payment_method)
   df$guest_checkout <- as.factor(df$guest_checkout)
-  #df$promo_order_length <- factor(df$promo_order_length, 
-                                #levels = sort(unique(df$promo_order_length)))
   df$loyalty_tier <- factor(df$loyalty_tier, 
                           levels = c("None", "Bronze", "Silver", "Gold", "Platinum"))
   if("returned" %in% names(df)) {
@@ -206,6 +200,13 @@ remove_var <- function(df) {
   df$loyalty_tier <- NULL
   df$marketing_channel <- NULL
   df$payment_method <- NULL
+  df$promo_winter50 <- NULL
+  df$promo_save20 <- NULL
+  df$promo_newuser <- NULL
+  df$month <- NULL 
+  #df$promo_count <- NULL
+  #df$customer_age <- NULL
+  #df$day <- NULL
 
   return(df)
 }
@@ -268,14 +269,14 @@ watchlist = list(train = xgb_train, test = xgb_test)
 # Fit model
 xgb_model = xgb.train(
   params = list(
-    learning_rate = 0.02, 
-    max_depth = 5, 
+    learning_rate = 0.03, 
+    max_depth = 4, 
     objective = "binary:logistic",
     eval_metric = "auc",
-    subsample = 0.4,
-    min_child_weight = 22,
+    subsample = 0.5,
+    min_child_weight = 21,
     colsample_bytree = 0.2,
-    gamma = 2
+    gamma = 3
   ),
   data = xgb_train, 
   evals = watchlist, 
@@ -298,76 +299,6 @@ pred_xgb <-predict(xgb_model, newdata = xgb_test, iterationrange = c(1, best_rou
 
 roc_xgb <- roc(test_y, pred_xgb, quiet = TRUE)
 print(auc(roc_xgb))
-```
-
-### CV XGBoost
-
-```{r}
-# 1. Run the CV to find the 'True' AUC and the best number of rounds
-cv_model <- xgb.cv(
-  params = list(
-    learning_rate = 0.02, 
-    max_depth = 5,
-    objective = "binary:logistic",
-    eval_metric = "auc",
-    subsample = 0.5,
-    colsample_bytree = 0.3,
-    min_child_weight = 30,
-    gamma = 2
-  ),
-  data = xgb_train,        # Use your 66/33 undersampled DMatrix here
-  nfold = 5,               # 5 folds is standard for Kaggle
-  nrounds = 2000,          
-  early_stopping_rounds = 100,
-  print_every_n = 50,
-  stratified = TRUE,       # CRITICAL: Keeps the 66/33 balance in every fold
-  verbose = 1
-)
-
-# 2. Extract the log (it's a data.table)
-cv_log <- cv_model$evaluation_log
-
-# 3. Find the row index where the average test AUC was highest
-best_round <- which.max(cv_log$test_auc_mean)
-
-# 4. Double check it
-print(paste("The best round is:", best_round))
-
-# 3. Look at your 'True' Expected Score
-# This 'test_auc_mean' is usually much closer to the Kaggle Leaderboard
-final_cv_auc <- max(cv_model$evaluation_log$test_auc_mean)
-print(paste("Expected Kaggle AUC:", round(final_cv_auc, 4)))
-```
-
-### Make final CV model with Best Rounds
-
-```{r}
-
-final_xgb_model <- xgb.train(
-  params = list(
-    learning_rate = 0.02, 
-    max_depth = 5,
-    objective = "binary:logistic",
-    eval_metric = "auc",
-    subsample = 0.5,
-    colsample_bytree = 0.3,
-    min_child_weight = 30,
-    gamma = 2
-  ),
-  data = xgb_train, # Your full DMatrix
-  nrounds = best_round
-)
-
-```
-
-### Predict CV XGboost
-
-```{r}
-# Predict
-pred_xgb_cv <-predict(final_xgb_model, newdata = xgb_test)
-
-roc_xgb_cv <- roc(test_y, pred_xgb_cv, quiet = TRUE)
-print(auc(roc_xgb_cv))
 ```
 
 ## Testing Data
@@ -408,7 +339,84 @@ kaggle_preds <- predict(xgb_model,
 submission <- data.frame(transaction_id = test_id, 
                          returned = kaggle_preds)
 
-write.csv(submission, "submission_37.csv", row.names = FALSE)
+write.csv(submission, "submission_41.csv", row.names = FALSE)
+```
+
+## Importance Variable
+
+```{r}
+importance_matrix <- xgb.importance(model = xgb_model)
+
+xgb.ggplot.importance(importance_matrix) +
+  ggtitle("XGBoost Variable Importance") +
+  theme_minimal() 
+```
+
+## CV XGBoost
+
+### Fit CV xgboost
+
+```{r}
+# 1. Run the CV to find the 'True' AUC and the best number of rounds
+cv_model <- xgb.cv(
+  params = list(
+    learning_rate = 0.03, 
+    max_depth = 4,
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    subsample = 0.5,
+    colsample_bytree = 0.2,
+    min_child_weight = 21,
+    gamma = 3
+  ),
+  data = xgb_train,        # Use your 66/33 undersampled DMatrix here
+  nfold = 5,               # 5 folds is standard for Kaggle
+  nrounds = 3000,          
+  early_stopping_rounds = 300,
+  print_every_n = 100,
+  stratified = TRUE,       # CRITICAL: Keeps the 66/33 balance in every fold
+  verbose = 1
+)
+
+# 2. Extract the log (it's a data.table)
+cv_log <- cv_model$evaluation_log
+
+# 3. Find the row index where the average test AUC was highest
+best_round <- which.max(cv_log$test_auc_mean)
+
+# 4. Double check it
+print(paste("The best round is:", best_round))
+
+# 3. Look at your 'True' Expected Score
+# This 'test_auc_mean' is usually much closer to the Kaggle Leaderboard
+final_cv_auc <- max(cv_model$evaluation_log$test_auc_mean)
+print(paste("Expected Kaggle AUC:", round(final_cv_auc, 4)))
+
+final_xgb_model <- xgb.train(
+  params = list(
+    learning_rate = 0.03, 
+    max_depth = 4,
+    objective = "binary:logistic",
+    eval_metric = "auc",
+    subsample = 0.5,
+    colsample_bytree = 0.2,
+    min_child_weight = 21,
+    gamma = 3
+  ),
+  data = xgb_train, # Your full DMatrix
+  nrounds = best_round
+)
+
+```
+
+### Predict CV XGboost
+
+```{r}
+# Predict
+pred_xgb_cv <-predict(final_xgb_model, newdata = xgb_test)
+
+roc_xgb_cv <- roc(test_y, pred_xgb_cv, quiet = TRUE)
+print(auc(roc_xgb_cv))
 ```
 
 ## XGBoost Autotuning
